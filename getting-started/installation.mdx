@@ -1,0 +1,110 @@
+---
+title: "Install StartOS on your hardware"
+description: "Choose between a ready-to-run Start9 server or flashing StartOS yourself. Covers compatible hardware, supported platforms, and building from source."
+---
+
+StartOS runs on commodity x86_64 and ARM hardware. You can get a server pre-loaded with StartOS from [store.start9.com](https://store.start9.com), or flash it yourself on hardware you already own. Both paths give you the same OS — the difference is how much setup you do yourself.
+
+## Option 1: Buy a Start9 server
+
+The simplest path. Start9 sells purpose-built hardware that arrives with StartOS pre-installed and tested. Plug it in, connect to your local network, and skip directly to the [quickstart guide](/getting-started/quickstart).
+
+<Card title="Browse Start9 hardware" icon="store" href="https://store.start9.com">
+  Pre-loaded servers from Start9. Plug in and run.
+</Card>
+
+## Option 2: Flash your own hardware
+
+If you already have compatible hardware, want to save on shipping, or simply prefer to build things yourself, you can download a StartOS image and flash it directly.
+
+### Supported platforms
+
+StartOS targets the following platforms:
+
+| Platform | Notes |
+| --- | --- |
+| `x86_64` | Standard 64-bit Intel/AMD desktop or server hardware |
+| `x86_64-nonfree` | x86_64 with proprietary firmware and drivers included |
+| `aarch64` | 64-bit ARM boards and single-board computers |
+| `aarch64-nonfree` | aarch64 with proprietary firmware included |
+| `riscv64` | RISC-V 64-bit hardware |
+| `raspberrypi` | Raspberry Pi (includes non-free components by necessity) |
+
+<Note>
+  The `-nonfree` variants include proprietary firmware required by some Wi-Fi adapters and network cards. Use them if your hardware has connectivity issues on the free build.
+</Note>
+
+### Minimum hardware requirements
+
+- 64-bit CPU (x86_64, aarch64, or riscv64)
+- 8 GB RAM recommended (4 GB minimum)
+- 64 GB storage (SSD strongly recommended for service performance)
+- Wired Ethernet connection for initial setup
+
+### Flash the image
+
+<Steps>
+  <Step title="Download the StartOS image">
+    Download the `.iso` (x86_64/aarch64/riscv64) or `.img` (Raspberry Pi) for your platform from the [StartOS releases page](https://github.com/Start9Labs/start-os/releases).
+  </Step>
+  <Step title="Flash to a drive">
+    Write the image to a USB drive or SD card using a tool like [Balena Etcher](https://www.balena.io/etcher/) or `dd`.
+
+    ```bash
+    # Example using dd (replace sdX with your target device)
+    sudo dd if=startos-x86_64.iso of=/dev/sdX bs=4M status=progress
+    ```
+
+    <Warning>
+      This will erase all data on the target drive. Double-check the device path before running.
+    </Warning>
+  </Step>
+  <Step title="Boot from the drive">
+    Insert the drive into your target machine, boot from it, and follow the on-screen installer. StartOS will install to the machine's primary storage.
+  </Step>
+  <Step title="Complete initial setup">
+    After installation, follow the [quickstart guide](/getting-started/quickstart) to connect to your server and run the setup wizard.
+  </Step>
+</Steps>
+
+## Option 3: Build from source
+
+Building from source is the path for contributors and developers who want to modify StartOS itself.
+
+<Note>
+  Debian/Ubuntu is the only officially supported build environment. macOS has limited build capabilities; Windows requires [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
+</Note>
+
+### Prerequisites
+
+Install the required dependencies on Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl gpg build-essential
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=$(dpkg-architecture -q DEB_HOST_ARCH) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bookworm stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt install -y sed grep gawk jq gzip brotli containerd.io docker-ce docker-ce-cli docker-compose-plugin \
+  qemu-user-static binfmt-support squashfs-tools git debspawn rsync b3sum
+sudo usermod -aG docker $USER
+```
+
+Install Rust and Node.js:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+source ~/.bashrc
+nvm install 24 && nvm use 24 && nvm alias default 24
+```
+
+### Clone and build
+
+```bash
+git clone --recursive https://github.com/Start9Labs/start-os.git --branch next/major
+cd start-os
+PLATFORM=x86_64 ENVIRONMENT=dev make iso
+```
+
+The resulting `.iso` will be in the `results/` directory. See the [development setup guide](/contributing/development-setup) for the full build reference, make targets, and how to deploy to a device over the network.

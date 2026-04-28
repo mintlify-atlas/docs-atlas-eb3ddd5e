@@ -1,0 +1,200 @@
+---
+title: "Updates, Backups, and Recovery for StartOS"
+description: "Trigger OTA updates, enter diagnostic mode, restore from backup, troubleshoot common failures, and understand what a factory reset permanently deletes."
+---
+
+Keeping StartOS up to date and knowing how to recover from problems are the two most important skills for running a personal server. This page covers over-the-air OS updates, the diagnostic mode you can enter when the system fails to boot normally, restoring data from a backup, and a guide to common issues. Read the warnings on factory reset before proceeding with any destructive operation — data loss from these actions is permanent.
+
+## Updating StartOS
+
+StartOS supports over-the-air (OTA) updates delivered as signed squashfs images. Updates are downloaded, cryptographically verified, and staged before any change is made to the running system, so a failed download cannot leave your system in a broken state.
+
+### How Updates Work
+
+The update process runs in four phases:
+
+1. **Pruning** — Old OS images are cleaned from `/media/startos/images/` to ensure enough space for the download.
+2. **Downloading** — The new squashfs image is streamed to `/media/startos/images/next.squashfs` via an atomic file write. A real-time progress bar tracks bytes downloaded.
+3. **Reverifying** — After download, the file is re-checked against a Blake3 commitment (hash + size) to guarantee integrity before it is saved.
+4. **Finalizing** — The upgrade script is extracted from the image and run to configure the bootloader (GRUB) to boot from the new image on next restart.
+
+Only after all four phases complete does StartOS mark the update as pending a restart. If any phase fails, the update is aborted, the partial image is discarded, and an error notification is sent.
+
+### Triggering an Update
+
+<Steps>
+  <Step title="Check for available updates">
+    Go to **System** → **Software Update**. StartOS queries the configured registry for OS versions newer than what is currently installed. If an update is available, the target version is shown.
+  </Step>
+  <Step title="Start the update">
+    Click **Update**. A progress bar appears showing the four phases. The admin UI remains usable during the download — your services continue running.
+  </Step>
+  <Step title="Restart to apply">
+    When the update completes, a banner prompts you to restart. Click **Restart Now** or schedule it for a convenient time. The server reboots into the new OS image. Services that were running before the restart will start automatically after the system comes back up.
+  </Step>
+</Steps>
+
+<Note>
+  If the server restarts before the update completes (e.g., a power cut during download), the partial image is discarded on next boot and the server starts normally on its current OS version. No data is lost.
+</Note>
+
+<Tip>
+  If an update is already in progress or a restart is already pending from a previous update, StartOS will refuse to start another update until the pending one is resolved. Restart the server to clear a pending-restart state before trying again.
+</Tip>
+
+## Diagnostic Mode
+
+Diagnostic mode is a minimal operating context that StartOS enters automatically when it detects a critical error during normal startup — for example, a corrupted database or a failed initialization step.
+
+### What Diagnostic Mode Provides
+
+In diagnostic mode, the admin UI loads a stripped-down interface that gives you access to:
+
+- **Error details** — The specific error that caused the boot failure, surfaced from the `DiagnosticContext`.
+- **System logs** — Full OS logs and kernel logs to help identify the root cause.
+- **Restart** — Trigger a clean restart to retry normal boot after you have addressed the underlying problem.
+- **Disk repair** — Run filesystem repair tools on the data disk if the issue is storage-related.
+- **Rebuild containers** — Tear down and rebuild all service containers without touching service data. This resolves issues caused by a corrupted container runtime state. It works by writing a rebuild flag file that the init system checks on next boot.
+
+### When to Use Diagnostic Mode
+
+- The admin UI shows a boot error banner instead of the normal dashboard.
+- Services are listed as errored and cannot be started after a restart.
+- The system reports a database deserialization error on startup.
+
+<Warning>
+  Diagnostic mode does not give you access to your services. Do not run disk repair unless you suspect filesystem corruption — it is a destructive operation if the disk is healthy and mounted.
+</Warning>
+
+## Resetting and Reflashing
+
+A full reinstall of StartOS is required when:
+
+- The data disk has failed and cannot be repaired.
+- You have forgotten your admin password and need to start fresh.
+- You are repurposing the hardware for a new server.
+- Corruption is too severe for diagnostic mode to resolve.
+
+To reflash StartOS, follow the [install guide](https://docs.start9.com/start-os/installing.html) for your hardware. This involves writing a new StartOS image to the boot drive. **All data on the server is erased during this process.**
+
+Before reflashing, ensure you have a current backup (see below). If you are selling or transferring the hardware, perform a factory reset to wipe all data first.
+
+## Restoring from Backup
+
+StartOS supports full server restoration from a backup created by the **Backup** feature. Backups include OS-level configuration (server identity, keys, settings) and service data volumes.
+
+### Backup Targets
+
+Backups are written to a configured target — an external drive or network share. Go to **System** → **Backups** → **Targets** to add and manage targets. Each target is mounted, encrypted with your backup password, and written to a directory named after your server's ID.
+
+### Creating a Backup
+
+<Steps>
+  <Step title="Verify your backup target is connected">
+    Ensure your external drive is plugged in or your network share is reachable. Go to **System** → **Backups** → **Targets** and confirm the target shows as available.
+  </Step>
+  <Step title="Initiate the backup">
+    Click **Create Backup**. StartOS backs up the OS configuration and each installed service's data. Services that are running are paused during their individual backup window and restarted afterward.
+  </Step>
+  <Step title="Confirm completion">
+    The backup report shows which services were backed up successfully and which (if any) had errors. The backup is now available for restoration.
+  </Step>
+</Steps>
+
+### Restoring Services from Backup
+
+If you need to restore one or more services to a previous state — for example after accidental deletion or data corruption — you can restore from a backup without reinstalling the OS.
+
+<Steps>
+  <Step title="Connect the backup target">
+    Plug in the drive or ensure the network share is reachable.
+  </Step>
+  <Step title="Open the restore dialog">
+    Go to **System** → **Backups** → **Restore**. Select your backup target and enter the backup password.
+  </Step>
+  <Step title="Select services to restore">
+    StartOS lists the services stored in the backup. Select the ones you want to restore. You can optionally specify a server ID if you are restoring from a backup made on a different server.
+  </Step>
+  <Step title="Confirm and wait">
+    Click **Restore**. StartOS downloads and installs each service's `.s9pk` from the Marketplace (or uses the cached copy if available), then restores the data volume from the backup. Up to five services are restored concurrently.
+  </Step>
+</Steps>
+
+### Full Server Restore (After Reinstall)
+
+If you have reflashed StartOS and want to restore your entire previous configuration:
+
+<Steps>
+  <Step title="Complete initial setup">
+    Run through the setup wizard on the fresh install. When prompted, choose **Restore from Backup** instead of setting up as a new server.
+  </Step>
+  <Step title="Connect the backup target">
+    Select your backup target device and enter your backup password.
+  </Step>
+  <Step title="Wait for restoration">
+    StartOS restores the OS-level configuration (hostname, keys, network settings) and reinstalls and restores all services from the backup. This may take significant time depending on the amount of service data.
+  </Step>
+</Steps>
+
+## Troubleshooting Common Issues
+
+<AccordionGroup>
+  <Accordion title="A service won't start">
+    Check the following in order:
+
+    1. **Configuration** — Open the service's **Config** tab. If any required field is empty or invalid, the service cannot start. Fill in the missing values and save.
+    2. **Dependencies** — Open the **Dependencies** section. If a required dependency is stopped or missing, start or install it first.
+    3. **Tasks** — Open the **Tasks** panel. A critical active task automatically stops a service. Resolve the task to allow the service to start.
+    4. **Logs** — Open the **Logs** tab and look for error messages at the bottom of the log stream. Common issues include port conflicts, misconfigured credentials, and missing files.
+    5. **Error state** — If the service shows an error badge, check the error message in the status area. You may need to reconfigure or reinstall the service.
+  </Accordion>
+  <Accordion title="The admin UI is unreachable on the local network">
+    1. Verify the server is powered on and connected to your network (check the Ethernet/WiFi LED indicators).
+    2. Try reaching the server by IP address instead of hostname — your router's DHCP client list will show the server's IP.
+    3. Try a different browser or clear the browser cache. The admin UI uses a persistent WebSocket; stale connections can sometimes cause the page to hang.
+    4. If you recently changed the hostname, flush your local DNS cache (`sudo dscacheutil -flushcache` on macOS, or disconnect and reconnect to the network on mobile devices).
+    5. If none of the above works, connect a monitor and keyboard to the server to check for boot errors. Diagnostic mode may have activated — see [Diagnostic Mode](#diagnostic-mode) above.
+  </Accordion>
+  <Accordion title="Disk is full">
+    1. Go to **System** → **Storage** to see which services are consuming the most space.
+    2. Remove services you no longer need — choose **Delete Data** during uninstall to free their volumes.
+    3. Check the **Logs** directory; verbose services can generate large log files. Log trimming is handled automatically, but a runaway service may fill disk quickly.
+    4. If an update was in progress when the disk filled, the partial image may be taking space. Restart the server — StartOS prunes old images before each update attempt.
+    5. As a last resort, connect a larger drive and follow the storage migration process.
+  </Accordion>
+  <Accordion title="Update failed">
+    When an update fails, StartOS sends an error notification with details, plays a distinct alert sound, and clears the update progress indicator. The system remains on its current OS version.
+
+    Common causes:
+    - **Network error during download** — Retry the update. The download resumes from scratch since partial images are not reused.
+    - **Signature verification failure** — This indicates the downloaded image was tampered with or corrupted in transit. Report it to Start9 at security@start9.com. Do not retry until the issue is investigated.
+    - **Insufficient disk space** — Free up space (see disk full troubleshooting above) then retry.
+  </Accordion>
+  <Accordion title="Backup failed for one or more services">
+    The backup report shown after a backup run lists per-service success and error status. For services that failed:
+
+    1. Check that the backup target is still connected and has sufficient space.
+    2. Review the service logs around the time of the backup attempt.
+    3. Try stopping the affected service before running the backup — some services back up more reliably when stopped.
+    4. If failures are persistent, try removing and re-adding the backup target.
+  </Accordion>
+</AccordionGroup>
+
+## Factory Reset Considerations
+
+<Warning>
+  **A factory reset permanently deletes all service data, configuration, and credentials stored on the server.** This action cannot be undone. Create a backup before proceeding if there is any data you want to keep.
+</Warning>
+
+A factory reset is appropriate when:
+
+- You are transferring or selling the hardware and want to remove all personal data.
+- You want to start completely fresh without any trace of previous configuration.
+
+A factory reset is **not** appropriate when:
+
+- You have forgotten your password — reflash instead and restore from backup.
+- A single service is broken — uninstall and reinstall that service.
+- The system is in diagnostic mode — use the rebuild or disk repair tools first.
+
+To perform a factory reset, reflash the StartOS image as described in [Resetting and Reflashing](#resetting-and-reflashing). There is no one-click factory reset in the admin UI — the reflash process is the equivalent operation.

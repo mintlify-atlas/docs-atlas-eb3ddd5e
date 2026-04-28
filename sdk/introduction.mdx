@@ -1,0 +1,145 @@
+---
+title: "Start SDK: TypeScript service packaging framework"
+description: "Learn what the Start SDK is, how its two npm packages are structured, and how service code flows from TypeScript to the StartOS runtime."
+---
+
+The Start SDK (`@start9labs/start-sdk`) is a TypeScript framework for packaging third-party software as signed `.s9pk` files that run on StartOS. It provides a strongly-typed, builder-pattern API for every aspect of a service package — manifests, daemons, health checks, network interfaces, user actions, backups, dependencies, configuration file management, and more. Rather than writing ad-hoc shell scripts or Docker Compose files, you express the full lifecycle of your service in type-safe TypeScript that the StartOS runtime supervises directly.
+
+## Two-package architecture
+
+The SDK ships as two npm packages with a layered dependency:
+
+<CardGroup cols={2}>
+  <Card title="@start9labs/start-sdk" icon="box">
+    The full SDK for service developers. Provides the `StartSdk` facade, daemon management, health checks, backup helpers, file helpers, subcontainers, triggers, i18n, and the plugin system. Re-exports everything from `start-sdk-base`.
+  </Card>
+  <Card title="@start9labs/start-sdk-base" icon="cube">
+    Core types, the ABI contract, the Effects interface, OS bindings, action/input builders, the ExVer parser, interface and dependency builders, and S9pk utilities. Use this directly only when you need types or validation without the full SDK.
+  </Card>
+</CardGroup>
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  @start9labs/start-sdk  (package/)                          │
+│  StartSdk facade, daemon management, health checks,         │
+│  backup system, file helpers, triggers, subcontainers       │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  @start9labs/start-sdk-base  (base/)                  │  │
+│  │  ABI, Effects, OS bindings, actions/input builders,   │  │
+│  │  ExVer parser, interfaces, dependencies, S9pk, utils  │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+         │                                        ▲
+         │ Effects calls (RPC)                    │ Callbacks
+         ▼                                        │
+┌─────────────────────────────────────────────────────────────┐
+│  StartOS Runtime (Rust supervisor)                          │
+│  Executes effects, manages containers, networking, storage  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+All runtime interaction happens through an `Effects` object injected into every lifecycle hook. Your service code never makes direct system calls — the runtime mediates everything, which makes the boundary explicit and your code testable with mock effects.
+
+## The ABI contract
+
+Every service package must export a specific set of named functions. These are defined in the `ExpectedExports` namespace in `base/lib/types.ts`:
+
+```typescript
+namespace ExpectedExports {
+  main          // Start the service daemon(s)
+  init          // Initialize on install, update, or restore
+  uninit        // Clean up on uninstall, update, or shutdown
+  manifest      // Service metadata
+  actions       // User-invocable operations
+  createBackup  // Export service data
+}
+```
+
+The `StartSdk` facade — constructed via `StartSdk.of().withManifest(manifest).build(true)` — produces helpers that satisfy every one of these exports with full type safety. The manifest type threads through the entire API via generics: volume names, image IDs, dependency IDs, and plugin list all become type constraints on subsequent calls such as `Mounts.of().mountVolume()`.
+
+## Key features
+
+<AccordionGroup>
+  <Accordion title="Type-safe manifest definitions">
+    Declare your service's identity, metadata, images, volumes, and dependencies with full TypeScript inference. The manifest type flows through the entire SDK — a typo in a volume name is a compile error, not a runtime failure.
+  </Accordion>
+  <Accordion title="Daemon management">
+    Define multi-process topologies with startup ordering, ready probes, and graceful shutdown via `Daemons.of().addDaemon()`. Use `requires` to declare inter-daemon dependencies so the runtime starts them in the correct order.
+  </Accordion>
+  <Accordion title="Health checks">
+    Built-in checks for TCP port listening, HTTP(S) endpoints, and custom scripts, with configurable polling strategies: `defaultTrigger` (1 s while pending, 30 s otherwise), `cooldownTrigger` (fixed interval), and `statusTrigger` (per-status intervals).
+  </Accordion>
+  <Accordion title="Network interfaces">
+    Bind ports and export UI, API, or P2P interfaces using `MultiHost` and `ServiceInterfaceBuilder`. A single `MultiHost` can bind one port and export multiple interfaces at different paths.
+  </Accordion>
+  <Accordion title="User actions">
+    Create interactive operations with validated form inputs — text, select, toggle, list, union/variants, and more — that users can trigger from the StartOS UI.
+  </Accordion>
+  <Accordion title="Backup and restore">
+    Rsync-based volume backups with exclude patterns and custom sync paths. Choose from `Backups.ofVolumes()`, `Backups.ofSyncs()`, or `Backups.withOptions()`.
+  </Accordion>
+  <Accordion title="Dependency management">
+    Declare inter-service dependencies with version ranges, health check requirements, and optional volume mounts. The runtime enforces these at install time and at runtime.
+  </Accordion>
+  <Accordion title="Configuration file helpers">
+    Read, write, and merge JSON, YAML, TOML, INI, and ENV files with a type-safe `FileHelper`. Supports reactive reading — when the file changes, the enclosing context is automatically retried.
+  </Accordion>
+  <Accordion title="Reactive subscriptions">
+    Watch for changes to container IPs, SSL certificates, SMTP config, service status, and more with `const()`, `once()`, `watch()`, `onChange()`, and `waitFor()` patterns provided by the `Watchable` base class.
+  </Accordion>
+  <Accordion title="Extended versioning (ExVer)">
+    Flavor-aware semantic versioning with range matching, supporting independent upstream and downstream version tracking. See the [versioning reference](/sdk/versioning) for the full format.
+  </Accordion>
+  <Accordion title="Internationalization">
+    Built-in i18n support with locale fallback and parameter substitution via `setupI18n()`.
+  </Accordion>
+  <Accordion title="Subcontainers and plugin system">
+    Run commands in isolated subcontainers with volume mounts and entrypoint overrides. Extend packages with the plugin system (e.g. `url-v0` for URL management).
+  </Accordion>
+</AccordionGroup>
+
+## Service lifecycle
+
+A packaged service goes through four phases managed by the StartOS runtime:
+
+```
+1. INSTALL / UPDATE / RESTORE
+   ├── init({ effects, kind })
+   │   ├── Version migrations (if update)
+   │   ├── setupDependencies()
+   │   ├── setupInterfaces() → bind ports, export interfaces
+   │   └── Actions registration → export actions to OS
+
+2. MAIN
+   │   setupMain() → Daemons.of(effects)
+   │   ├── Oneshots run first
+   │   ├── Daemons start in dependency order
+   │   ├── Health checks begin polling
+   │   └── Service runs until shutdown/restart
+
+3. SHUTDOWN / UNINSTALL / UPDATE
+   │   uninit({ effects, target })
+   │   └── Version down-migrations (if needed)
+
+4. BACKUP (user-triggered)
+       createBackup({ effects })
+       └── rsync volumes to backup location
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/sdk/quickstart">
+    Install the SDK, define a manifest, and build your first `.s9pk` package.
+  </Card>
+  <Card title="Manifest reference" icon="file-code" href="/sdk/manifest">
+    All manifest fields, image configuration, and the TypeScript API.
+  </Card>
+  <Card title="S9PK format" icon="archive" href="/sdk/s9pk-format">
+    Archive structure, cryptographic signing, and the merkle tree layout.
+  </Card>
+  <Card title="Packaging guide" icon="book" href="https://docs.start9.com/packaging">
+    Comprehensive tutorials on the Start9 documentation site.
+  </Card>
+</CardGroup>

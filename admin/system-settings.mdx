@@ -1,0 +1,176 @@
+---
+title: "Configuring System Settings in StartOS"
+description: "Manage your server's hostname, networking, remote access via WireGuard and Tor, SSH keys, notifications, storage, and password security from the admin UI."
+---
+
+The **System** section of the StartOS admin UI is where you configure everything about the server itself rather than individual services. Changes here affect networking, identity, remote access, and security across the entire system. Most settings take effect immediately or after a brief restart of the relevant subsystem — you do not need to reboot the server.
+
+## Server Identity
+
+### Hostname
+
+Your server's hostname is the human-readable name used to reach it on your local network. It appears as `<hostname>.local` on your LAN using mDNS.
+
+To change it:
+
+1. Go to **System** → **General**.
+2. Edit the **Hostname** field. Hostnames must be lowercase alphanumeric with hyphens only — no uppercase letters or special characters.
+3. Click **Save**. StartOS updates `/etc/hostname` and restarts the mDNS advertiser so the new name is resolvable on your network immediately.
+
+<Note>
+  The hostname is also used as the comment on your server's SSH public key (e.g. `start9@your-hostname`), so existing SSH sessions referencing the old hostname will need to be refreshed.
+</Note>
+
+### Domain Configuration
+
+If your server is reachable over the internet on a registered domain, you can configure that domain under **System** → **Domains**. StartOS uses ACME (Let's Encrypt) to provision and renew TLS certificates for custom domains automatically. The server must be reachable on port 443 from the internet for ACME HTTP-01 challenges to succeed.
+
+## Network Settings
+
+### Ethernet
+
+StartOS works out of the box over Ethernet. No configuration is required — plug in a cable and the server acquires an IP address via DHCP. The current IP address and connection status are visible in **System** → **Network**.
+
+### WiFi Setup
+
+If your server hardware has a WiFi adapter, you can connect it to a wireless network from **System** → **Network** → **WiFi**.
+
+<Steps>
+  <Step title="Scan for networks">
+    Click **Scan** to discover available SSIDs. StartOS uses `wpa_supplicant` internally to manage WiFi interfaces. The scan results list network names and signal strength.
+  </Step>
+  <Step title="Select and connect">
+    Click the network you want to join. Enter the WiFi password when prompted. StartOS stores the credentials in a `wpa_supplicant` configuration file and connects immediately.
+  </Step>
+  <Step title="Verify connectivity">
+    The network status indicator updates to show the connected SSID and assigned IP address. If connection fails, double-check the password and ensure the network is in range.
+  </Step>
+</Steps>
+
+<Warning>
+  If you are connected via WiFi and change to a different network without a fallback Ethernet connection, you may lose access to the admin UI until the new WiFi connection is established.
+</Warning>
+
+## Remote Access
+
+### WireGuard VPN
+
+WireGuard provides a fast, encrypted tunnel to your server from any device. Once configured, you can access your server's admin UI and services from anywhere as if you were on the local network.
+
+<Steps>
+  <Step title="Open VPN settings">
+    Go to **System** → **VPN**. StartOS shows your server's WireGuard public key and a list of registered client peers.
+  </Step>
+  <Step title="Add a client">
+    Click **Add Client**. Give the client a name (e.g. "laptop" or "phone") and StartOS generates a WireGuard configuration — including keys, the server endpoint, and allowed IPs — that you can download as a `.conf` file or scan as a QR code.
+  </Step>
+  <Step title="Install on your device">
+    Import the configuration into the WireGuard app on your device (available for iOS, Android, macOS, Windows, and Linux). The **Start Tunnel** web UI (`start-tunnel`) also provides a browser-based management experience for the VPN.
+  </Step>
+  <Step title="Connect">
+    Activate the tunnel on your device. Your device can now reach your server at its WireGuard IP address.
+  </Step>
+</Steps>
+
+### Tor Configuration
+
+StartOS runs Tor via the Arti library to provide `.onion` addresses for your server and services. Tor access does not require port forwarding or a public IP address.
+
+- Your server's Tor address is displayed in **System** → **Tor**. Share this address with users who should have access over Tor.
+- Individual services also receive their own `.onion` addresses, which appear in each service's **Interfaces** section.
+- Tor can be used alongside WireGuard — they serve different use cases and can both be active simultaneously.
+
+<Note>
+  Initial Tor bootstrapping can take a few minutes after a fresh install or reboot. The Tor status indicator in **System** → **Tor** shows the connection progress.
+</Note>
+
+## SSH Access
+
+SSH is disabled by default. Enabling it requires adding at least one public key — password-based SSH login is not supported for security reasons.
+
+<Steps>
+  <Step title="Generate a key pair on your device">
+    On your local machine, run:
+    ```bash
+    ssh-keygen -t ed25519 -C "your-comment"
+    ```
+    This creates `~/.ssh/id_ed25519` (private key) and `~/.ssh/id_ed25519.pub` (public key). Keep the private key secure; never share it.
+  </Step>
+  <Step title="Add the public key to StartOS">
+    Go to **System** → **SSH**. Click **Add Key** and paste the contents of your `id_ed25519.pub` file. StartOS stores the key and writes it to `/home/start9/.ssh/authorized_keys`.
+  </Step>
+  <Step title="Connect via SSH">
+    SSH into your server using:
+    ```bash
+    ssh start9@<hostname>.local
+    ```
+    Replace `<hostname>` with your server's configured hostname, or use the LAN IP address directly.
+  </Step>
+</Steps>
+
+<Warning>
+  SSH access gives you a root-equivalent shell on the server. Only add keys from devices you fully trust. Removing a key from the **SSH** settings page immediately revokes access for that key.
+</Warning>
+
+You can manage multiple keys — each entry shows the algorithm, MD5 fingerprint, hostname comment, and the date the key was added. Remove any key you no longer need.
+
+## Notifications
+
+StartOS sends system notifications for events like failed backups, update availability, and service errors. You can configure an SMTP relay to receive these notifications by email.
+
+<Steps>
+  <Step title="Open notification settings">
+    Go to **System** → **Notifications**.
+  </Step>
+  <Step title="Configure SMTP">
+    Enter your SMTP server address, port, username, password, and the sender/recipient email addresses. StartOS supports TLS-secured SMTP connections.
+  </Step>
+  <Step title="Send a test notification">
+    Click **Send Test Email** to verify the configuration. A test message is sent immediately; check your inbox (and spam folder) to confirm delivery.
+  </Step>
+</Steps>
+
+Notifications are also shown in-app in the notification bell in the top-right corner of the admin UI, regardless of whether email is configured.
+
+## System Updates
+
+StartOS itself can be updated over-the-air from the admin UI. Updates are downloaded as signed squashfs images and verified with a Blake3 commitment before being applied.
+
+To check for and apply an update, see the [Updates and Recovery](/admin/updates-and-recovery) page.
+
+## Storage Management
+
+### Viewing Disk Usage
+
+Go to **System** → **Storage** to see an overview of how disk space is allocated across the system. The view shows total capacity, used space, and a per-service breakdown of volume sizes.
+
+### Managing Volumes
+
+Each installed service stores its data in an isolated volume directory. Volumes persist across service restarts and updates unless you explicitly delete them during uninstall.
+
+<AccordionGroup>
+  <Accordion title="What happens to volumes during a service update?">
+    Before applying an update, StartOS creates a snapshot of the service's data volumes. If the update or migration fails, the snapshot is restored automatically. Successful updates delete the snapshot to reclaim space.
+  </Accordion>
+  <Accordion title="Can I move volumes to external storage?">
+    StartOS supports configuring backup targets on external drives and network shares. Service data can be backed up to and restored from these targets. In-place volume migration to external storage is not supported through the UI.
+  </Accordion>
+</AccordionGroup>
+
+## Security Settings
+
+### Password Management
+
+Your StartOS admin UI login password is set during initial setup. To change it:
+
+1. Go to **System** → **Security**.
+2. Enter your current password and your new password (twice to confirm).
+3. Click **Change Password**.
+
+<Warning>
+  There is no "forgot password" recovery path that preserves your data. If you lose your admin password, you will need to perform a full reinstall. Store your password securely in a password manager.
+</Warning>
+
+### Session Management
+
+StartOS uses session cookies for admin UI authentication. Sessions are valid until you log out or the server restarts. You can view active sessions and revoke any you do not recognize from **System** → **Security** → **Sessions**.

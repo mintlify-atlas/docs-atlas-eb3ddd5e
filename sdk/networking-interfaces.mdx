@@ -1,0 +1,197 @@
+---
+title: "Networking Interfaces: Binding Ports and Exporting Endpoints"
+description: "Learn how StartOS services declare network interfaces using MultiHost, bindPort, and ServiceInterfaceBuilder to expose UI, API, and P2P endpoints."
+---
+
+Every service that communicates over a network must declare its interfaces to StartOS. The interfaces system gives StartOS the information it needs to route traffic, assign hostnames, manage TLS certificates, and present endpoints to users — whether that's a browser-accessible web UI, a programmatic API, or a peer-to-peer connection. Declaring interfaces is distinct from simply opening a port: the SDK's interface model carries semantic meaning (type, name, description, path, query parameters) that the OS uses to build a coherent user experience around your service.
+
+## Core concepts
+
+An interface in StartOS is a named, typed network endpoint that the OS manages on behalf of your service. Before you can export an interface, you bind the underlying container port using `MultiHost.bindPort()`. The resulting `Origin` represents the combination of host, port, and protocol. You then describe one or more logical interfaces on that origin and call `origin.export()` to register them with the OS.
+
+| Concept | Description |
+|---|---|
+| `MultiHost` | Represents a network host. A single host can bind multiple ports and back multiple interfaces. |
+| `Origin` | A bound port on a host. Encapsulates the internal port, protocol, and optional SSL upgrade. |
+| `ServiceInterfaceBuilder` | Describes a logical interface: name, type, path, query params, and scheme overrides. |
+| `createInterface` | Factory function that constructs a `ServiceInterfaceBuilder`. |
+
+## Interface types
+
+The `type` field on each interface determines how the OS and users interact with it.
+
+<AccordionGroup>
+  <Accordion title="ui — browser-accessible interfaces">
+    The `ui` type marks an interface as suitable for direct browser access. StartOS exposes it as a clickable launch URL in the service's detail page. Use this for web frontends, admin panels, and dashboards.
+  </Accordion>
+  <Accordion title="api — programmatic access">
+    The `api` type marks an interface as a machine-readable endpoint. It is listed under the service's interface information but is not promoted as a launch URL. Use this for REST APIs, gRPC endpoints, and RPC services that other services or external tools consume.
+  </Accordion>
+  <Accordion title="p2p — peer-to-peer connections">
+    The `p2p` type marks an interface used for peer-to-peer communication with other nodes. Use this for Lightning Network listeners, BitTorrent peers, and similar protocols.
+  </Accordion>
+</AccordionGroup>
+
+## Setting up interfaces
+
+The `setupInterfaces` function is the entry point for declaring all network interfaces. It receives an `effects` object and must return an array of `AddressReceipt` values — one per origin from which you exported interfaces.
+
+```typescript
+export const setInterfaces = sdk.setupInterfaces(async ({ effects }) => {
+  const multi = sdk.MultiHost.of(effects, 'web')
+  const origin = await multi.bindPort(80, { protocol: 'http' })
+  const ui = sdk.createInterface(effects, {
+    name: 'Web UI',
+    id: 'ui',
+    description: 'The primary web interface for this service.',
+    type: 'ui',
+    username: null,
+    path: '/',
+    query: {},
+    schemeOverride: null,
+    masked: false,
+  })
+  return [await origin.export([ui])]
+})
+```
+
+<Note>
+The return value of `setupInterfaces` is automatically passed to the OS. Every call to `origin.export()` registers the provided interfaces and clears any previously registered interfaces or bindings not present in the current call.
+</Note>
+
+## Binding ports
+
+`MultiHost.of(effects, hostId)` creates (or retrieves) a host identified by `hostId`. Host IDs are arbitrary strings — use a meaningful name like `'web'` or `'rpc'`. The host ID must be consistent across restarts because StartOS uses it to maintain stable external addresses.
+
+Call `bindPort(internalPort, options)` to bind a container port. The `protocol` option determines default security settings and the scheme used in generated URLs.
+
+<CodeGroup>
+
+```typescript HTTP
+const origin = await multi.bindPort(80, { protocol: 'http' })
+// HTTP bindings automatically get an HTTPS variant via TLS termination
+```
+
+```typescript HTTPS (direct TLS)
+const origin = await multi.bindPort(443, { protocol: 'https' })
+// Use when your service handles TLS itself
+```
+
+```typescript Custom external port
+const origin = await multi.bindPort(8332, {
+  protocol: 'http',
+  preferredExternalPort: 8332,
+})
+```
+
+```typescript WebSocket
+const wsOrigin = await multi.bindPort(9735, { protocol: 'ws' })
+// 'ws' also gets a 'wss' SSL variant automatically
+```
+
+```typescript SSH / DNS
+const sshOrigin = await multi.bindPort(22, { protocol: 'ssh' })
+const dnsOrigin = await multi.bindPort(53, { protocol: 'dns' })
+```
+
+</CodeGroup>
+
+Supported protocols and their defaults:
+
+| Protocol | Default port | SSL variant |
+|---|---|---|
+| `http` | 80 | `https` |
+| `https` | 443 | — |
+| `ws` | 80 | `wss` |
+| `wss` | 443 | — |
+| `ssh` | 22 | — |
+| `dns` | 53 | — |
+
+## Building interfaces
+
+`sdk.createInterface(effects, options)` constructs a `ServiceInterfaceBuilder` describing a logical endpoint. Multiple interfaces can share a single origin (for example, a primary UI and an admin UI on the same port with different paths).
+
+```typescript
+const ui = sdk.createInterface(effects, {
+  name: 'Web UI',          // Display name shown in the StartOS UI
+  id: 'ui',               // Stable identifier — must not change across versions
+  description: 'Access the service through your browser.',
+  type: 'ui',             // 'ui' | 'api' | 'p2p'
+  username: null,         // Optional HTTP Basic Auth username
+  path: '/',              // URL path suffix
+  query: {},              // Query parameters appended to all URLs
+  schemeOverride: null,   // Override the scheme derived from bindPort
+  masked: false,          // Whether to hide the URL from the user
+})
+
+const api = sdk.createInterface(effects, {
+  name: 'JSON-RPC API',
+  id: 'rpc',
+  description: 'Machine-readable endpoint for wallet and node software.',
+  type: 'api',
+  username: null,
+  path: '/',
+  query: {},
+  schemeOverride: null,
+  masked: false,
+})
+
+// Export both interfaces from the same origin
+return [await origin.export([ui, api])]
+```
+
+## Exporting to multiple origins
+
+A service may bind several ports and export different interfaces from each. Return one receipt per origin from `setupInterfaces`.
+
+```typescript
+export const setInterfaces = sdk.setupInterfaces(async ({ effects }) => {
+  const webHost = sdk.MultiHost.of(effects, 'web')
+  const rpcHost = sdk.MultiHost.of(effects, 'rpc')
+
+  const webOrigin = await webHost.bindPort(80, { protocol: 'http' })
+  const rpcOrigin = await rpcHost.bindPort(8332, {
+    protocol: 'http',
+    preferredExternalPort: 8332,
+  })
+
+  const ui = sdk.createInterface(effects, {
+    name: 'Web UI', id: 'ui', description: 'Browser interface.',
+    type: 'ui', username: null, path: '/', query: {},
+    schemeOverride: null, masked: false,
+  })
+  const rpc = sdk.createInterface(effects, {
+    name: 'RPC', id: 'rpc', description: 'JSON-RPC endpoint.',
+    type: 'api', username: null, path: '/', query: {},
+    schemeOverride: null, masked: false,
+  })
+
+  return [
+    await webOrigin.export([ui]),
+    await rpcOrigin.export([rpc]),
+  ]
+})
+```
+
+## URL plugin
+
+The URL plugin lets your service export addresses to other services via a well-known plugin interface. This is how services like BTCPay Server discover the address of a Bitcoin node without hardcoding it.
+
+Register the plugin in your manifest's `plugins` field, then use `plugin.url.register` and `plugin.url.exportUrl` on the SDK:
+
+```typescript
+// Register the URL plugin (called during init)
+await sdk.plugin.url.register(effects, 'bitcoind-rpc', origin)
+
+// Export a specific URL to other services
+await sdk.plugin.url.exportUrl(effects, 'bitcoind-rpc', rpcOrigin.build({
+  username: null,
+  path: '/',
+  query: {},
+  schemeOverride: null,
+}))
+```
+
+<Tip>
+Use `plugin.url.clearUrls` during uninit to clean up exported URLs when your service is uninstalled or its interfaces change significantly.
+</Tip>

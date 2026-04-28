@@ -1,0 +1,127 @@
+---
+title: "Setting Up a Local StartOS Development Environment"
+description: "Install all required dependencies on Debian/Ubuntu, clone the repository, and configure dev mode to start contributing to StartOS."
+---
+
+Setting up a StartOS development environment requires a Debian or Ubuntu host. macOS has limited build capabilities, and Windows users must use WSL2. All builds ultimately run inside Docker, so the host system mainly needs to provide Docker, Rust, and Node.js alongside a handful of standard build tools.
+
+## Prerequisites
+
+<Note>
+Debian/Ubuntu is the only officially supported build environment. macOS has limited build capabilities. Windows requires [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) before following these steps.
+</Note>
+
+You will need the following tools installed before building StartOS:
+
+- **GNU Make** — drives all build targets
+- **Docker** (or Podman) — all compilation happens in containers
+- **Rust** (nightly toolchain required for formatting)
+- **Node.js v24** via nvm
+- Standard POSIX utilities: `sed`, `grep`, `awk`, `jq`, `gzip`, `brotli`
+
+## Installing dependencies
+
+Run the following commands on a fresh Debian/Ubuntu system. They install Docker, build essentials, Rust via rustup, and Node.js via nvm in one pass.
+
+<Steps>
+  <Step title="Install system packages and Docker">
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl gpg build-essential
+curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=$(dpkg-architecture -q DEB_HOST_ARCH) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian bookworm stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt update
+sudo apt install -y sed grep gawk jq gzip brotli containerd.io docker-ce docker-ce-cli docker-compose-plugin qemu-user-static binfmt-support squashfs-tools git debspawn rsync b3sum
+```
+
+  </Step>
+  <Step title="Configure Docker and debspawn">
+
+```bash
+sudo mkdir -p /etc/debspawn/
+echo "AllowUnsafePermissions=true" | sudo tee /etc/debspawn/global.toml
+sudo usermod -aG docker $USER
+sudo su $USER
+docker run --privileged --rm tonistiigi/binfmt --install all
+docker buildx create --use
+```
+
+  </Step>
+  <Step title="Install Rust">
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Proceed with the default installation when prompted.
+
+  </Step>
+  <Step title="Install Node.js via nvm">
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+source ~/.bashrc
+nvm install 24
+nvm use 24
+nvm alias default 24
+```
+
+Setting a default alias prevents your machine from reverting to a different Node.js version in future shell sessions.
+
+  </Step>
+</Steps>
+
+## Cloning the repository
+
+The repository uses git submodules, so pass `--recursive` when cloning. The active development branch is `next/major`.
+
+```bash
+git clone --recursive https://github.com/Start9Labs/start-os.git --branch next/major
+cd start-os
+```
+
+## Enabling development mode
+
+For faster iteration, source the dev mode script from the repository root:
+
+```bash
+. ./devmode.sh
+```
+
+This sets two environment variables for your current shell session:
+
+| Variable | Value | Effect |
+|---|---|---|
+| `ENVIRONMENT` | `dev` | Enables password SSH before setup; skips frontend compression |
+| `GIT_BRANCH_AS_HASH` | `1` | Uses the git branch name as the version hash to avoid rebuilds on every commit |
+
+<Tip>
+Re-run `. ./devmode.sh` whenever you open a new terminal. The variables are only set for the current shell session.
+</Tip>
+
+## Creating a VM for testing
+
+A virtual machine lets you test full StartOS images without touching physical hardware. Install virt-manager and add yourself to the `libvirt` group:
+
+```bash
+sudo apt update
+sudo apt install -y virt-manager
+sudo usermod -aG libvirt $USER
+sudo su $USER
+virt-manager
+```
+
+Before creating the VM, build a development ISO:
+
+```bash
+PLATFORM=$(uname -m) ENVIRONMENT=dev make iso
+```
+
+Then follow the screenshot walkthrough in [`assets/create-vm/`](https://github.com/Start9Labs/start-os/tree/next/major/assets/create-vm) to create a new virtual machine in virt-manager:
+
+1. Create a new virtual machine using local install media
+2. Browse for the ISO — create a storage pool pointing to your `results/` directory
+3. Select **Generic or unknown OS**
+4. Set memory and CPU count
+5. Create a disk image and name the VM

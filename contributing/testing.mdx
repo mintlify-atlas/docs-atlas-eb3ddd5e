@@ -1,0 +1,145 @@
+---
+title: "Testing, Formatting, and Commit Conventions in StartOS"
+description: "Run the full test suite or individual layer tests, format Rust and TypeScript code, and follow commit message conventions when contributing."
+---
+
+StartOS tests span three distinct layers — the Rust core, the TypeScript SDK, and the Node.js container runtime — each with its own test runner. Running the full suite before opening a pull request catches regressions across all of them. Formatting is enforced by separate tools per language and must pass before your code is accepted.
+
+## Running tests
+
+Use `make` to run tests at any level of granularity.
+
+<Tabs>
+  <Tab title="All tests">
+
+```bash
+make test
+```
+
+Runs the complete test suite across all layers.
+
+  </Tab>
+  <Tab title="Rust core">
+
+```bash
+make test-core
+```
+
+Runs Rust tests via `./core/run-tests.sh`.
+
+  </Tab>
+  <Tab title="SDK">
+
+```bash
+make test-sdk
+```
+
+Runs the TypeScript SDK tests.
+
+  </Tab>
+  <Tab title="Container runtime">
+
+```bash
+make test-container-runtime
+```
+
+Runs the Node.js container runtime tests.
+
+  </Tab>
+</Tabs>
+
+### Running a specific Rust test
+
+To run a single named test in the core crate without rebuilding everything:
+
+```bash
+cd core && cargo test <test_name> --features=test
+```
+
+Replace `<test_name>` with the exact test function name. The `--features=test` flag enables test-only code paths in the crate.
+
+## Type checking
+
+Type checking verifies each layer compiles without running tests. Run these in order when making cross-layer changes:
+
+```bash
+cargo check -p start-os           # Verify Rust compiles
+cd web && npm run check           # Type-check Angular projects
+cd container-runtime && npm run check  # Type-check the container runtime
+```
+
+<Note>
+Type checking follows the build pipeline order: Rust → SDK → web → container-runtime. If you change a Rust type that is exported to TypeScript, run `make ts-bindings` and rebuild the SDK before type-checking web or container-runtime. See the [build system](/contributing/build-system) page for the full pipeline.
+</Note>
+
+## Code formatting
+
+Run the formatters before every commit. Configuration is handled by `rustfmt.toml` for Rust and Prettier configs for TypeScript.
+
+<CodeGroup>
+
+```bash Rust (requires nightly)
+make format
+```
+
+```bash TypeScript, HTML, SCSS
+cd web && npm run format
+```
+
+</CodeGroup>
+
+<Warning>
+Rust formatting requires the nightly toolchain. If `make format` fails with a toolchain error, install nightly with `rustup toolchain install nightly`.
+</Warning>
+
+## Commit message format
+
+StartOS uses [Conventional Commits](https://www.conventionalcommits.org/). Every commit message must follow this structure:
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer]
+```
+
+**Allowed types:**
+
+| Type | When to use |
+|---|---|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `style` | Formatting, no code change |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `test` | Adding or updating tests |
+| `chore` | Build process, dependencies, etc. |
+
+**Examples:**
+
+```
+feat(web): add dark mode toggle
+fix(core): resolve race condition in service startup
+docs: update CONTRIBUTING.md with style guidelines
+refactor(sdk): simplify package validation logic
+```
+
+## Code style guidelines
+
+### Rust
+
+- Add doc comments (`///`) to public APIs, structs, and non-obvious functions
+- Use `//` comments sparingly — only for complex logic that is not self-evident
+- Prefer self-documenting code (clear naming, small functions) over explanatory comments
+
+### TypeScript
+
+- Document exported functions and complex types with JSDoc
+- Keep comments focused on "why" rather than "what"
+
+### General
+
+- Do not add comments that restate the code
+- Update or remove comments when the code they describe changes
+- TODOs should include context: `// TODO(username): reason`

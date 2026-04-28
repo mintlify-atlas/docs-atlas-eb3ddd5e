@@ -1,0 +1,125 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "StartOS",
+  "projectDescription": "An open-source Linux distribution for running a personal server, with service discovery, installation, networking, backup, and dependency management for self-hosted applications.",
+  "theme": "aspen",
+  "primaryColor": "#949494",
+  "lightColor": "#2d2d2d",
+  "darkColor": "#d2d2d2",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": ["introduction", "getting-started/installation", "getting-started/quickstart"]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/services-and-packages",
+              "concepts/networking",
+              "concepts/backups-and-storage"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "admin/managing-services",
+              "admin/system-settings",
+              "admin/updates-and-recovery"
+            ]
+          },
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/development-setup",
+              "contributing/build-system",
+              "contributing/testing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDK & Packaging",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "sdk/introduction",
+              "sdk/quickstart"
+            ]
+          },
+          {
+            "group": "Package Structure",
+            "pages": [
+              "sdk/manifest",
+              "sdk/s9pk-format",
+              "sdk/versioning"
+            ]
+          },
+          {
+            "group": "Service Lifecycle",
+            "pages": [
+              "sdk/main-and-daemons",
+              "sdk/init-and-uninit",
+              "sdk/health-checks",
+              "sdk/backups"
+            ]
+          },
+          {
+            "group": "Interfaces & Actions",
+            "pages": [
+              "sdk/networking-interfaces",
+              "sdk/user-actions",
+              "sdk/dependencies",
+              "sdk/file-helpers"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "sdk/api/effects",
+              "sdk/api/startsdk-facade"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "One-click service installation from the Start9 Marketplace",
+    "Automatic service dependency management and health monitoring",
+    "Tor and WireGuard networking with automatic ACME/SSL certificate management",
+    "Rsync-based encrypted backups with easy restore",
+    "TypeScript SDK for packaging third-party services as S9PK packages",
+    "S9PK merkle archive format with cryptographic verification and partial downloads",
+    "Reactive state synchronization via Patch-DB (WebSocket diff streaming)",
+    "LXC-based service isolation with container runtime",
+    "JSON-RPC API with CLI (start-cli) and Angular web UI",
+    "Extended versioning (ExVer) for independent upstream and downstream version tracking"
+  ],
+  "publicApiSurface": [
+    "StartSdk.of().withManifest(manifest).build(true)",
+    "sdk.setupMain(async ({ effects }) => sdk.Daemons.of(effects).addDaemon(...))",
+    "sdk.Action.withInput(id, metadata, inputSpec, prefill, execute)",
+    "sdk.Action.withoutInput(id, metadata, execute)",
+    "sdk.setupInterfaces(async ({ effects }) => [...])",
+    "sdk.setupBackups(async () => sdk.Backups.ofVolumes(...))",
+    "sdk.setupDependencies(async ({ effects }) => [...])",
+    "sdk.setupInit(async ({ effects, kind }) => [...])",
+    "sdk.Daemons.of(effects).addDaemon(id, config).addHealthCheck(id, config)",
+    "sdk.Mounts.of().mountVolume(id, path).mountAssets(id, path).mountDependency(...)",
+    "sdk.SubContainer.of(effects, image, mounts, name)",
+    "sdk.SubContainer.withTemp(effects, image, mounts, name, callback)",
+    "FileHelper.json/yaml/toml/ini/env(effects, path, defaults)",
+    "InputSpec.of().addField(id, Value.text(...)).addField(id, Value.select(...))",
+    "setupManifest({ id, title, license, images, volumes, dependencies, ... })",
+    "buildManifest(manifest)",
+    "start-cli s9pk pack <manifest-path> -o <output.s9pk>",
+    "Effects.bind / Effects.setHealth / Effects.restart / Effects.shutdown",
+    "Watchable: const() / once() / watch() / onChange() / waitFor()"
+  ]
+}

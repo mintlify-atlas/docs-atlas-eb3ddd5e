@@ -1,0 +1,139 @@
+---
+title: "StartOS System Architecture: Backend, Frontend, and Runtime"
+description: "How StartOS is structured across its Rust backend, Angular frontend, Node.js container runtime, and Patch-DB reactive state layer."
+---
+
+StartOS is an open-source Linux distribution for running personal servers. Its architecture spans four tightly coupled layers: a Rust daemon that owns all system state, an Angular web UI that reacts to state changes in real time, a Node.js runtime that executes service code inside LXC containers, and a Patch-DB synchronization layer that keeps the frontend consistently up to date without polling. Understanding how these layers fit together is the foundation for working with any part of the codebase.
+
+## Tech stack overview
+
+<CardGroup cols={2}>
+  <Card title="Rust backend (core/)" icon="cpu">
+    Async Tokio runtime with Axum HTTP framework. Produces the `startbox` binary that handles all daemon logic, RPC API, service lifecycle, networking, and database state.
+  </Card>
+  <Card title="Angular frontend (web/)" icon="monitor">
+    Angular 21 + TypeScript with Taiga UI 5. Three applications — admin UI, setup wizard, and VPN manager — communicating exclusively via JSON-RPC.
+  </Card>
+  <Card title="Container runtime (container-runtime/)" icon="box">
+    Node.js/TypeScript program that runs inside each service's LXC container. Loads the service's JavaScript from its S9PK package and manages subcontainers via JSON-RPC over a Unix socket to the host daemon.
+  </Card>
+  <Card title="Patch-DB" icon="database">
+    A diff-based state store (git submodule). Backend mutations produce CBOR-encoded diffs that are pushed to the frontend over a persistent WebSocket, enabling reactive UI updates with no polling.
+  </Card>
+</CardGroup>
+
+## Project structure
+
+```bash
+/
+├── assets/              # Screenshots for README
+├── build/               # Auxiliary files and scripts for deployed images
+├── container-runtime/   # Node.js program managing package containers
+├── core/                # Rust backend: API, daemon (startd), CLI (start-cli)
+├── debian/              # Debian package maintainer scripts
+├── image-recipe/        # Scripts for building StartOS images
+├── patch-db/            # (submodule) Diff-based data store for frontend sync
+├── sdk/                 # TypeScript SDK for building StartOS packages
+└── web/                 # Web UIs (Angular)
+```
+
+## The `startbox` binary and its symlinks
+
+The Rust crate compiles to a single binary, `startbox`, which detects its own name at startup and branches on the appropriate behavior. This means one binary serves every role in the system:
+
+| Symlink | Role |
+|---|---|
+| `startd` | Main daemon — runs persistently, owns all backend state |
+| `start-cli` | CLI interface for operators and build tooling |
+| `start-container` | Runs inside LXC containers; bridges the service to the host daemon |
+| `registrybox` | Package registry daemon |
+| `tunnelbox` | VPN/tunnel daemon for WireGuard management |
+
+## Key modules in the Rust backend
+
+The `core/` crate is organized around a set of focused modules:
+
+<AccordionGroup>
+  <Accordion title="src/context/ — Context types">
+    Four context types drive handler dispatch: `RpcContext` (the live daemon), `CliContext` (CLI invocation), `InitContext` (system initialization), and `DiagnosticContext` (recovery mode). Handlers are generic over context, so the same logic can run in multiple modes.
+  </Accordion>
+  <Accordion title="src/service/ — Service lifecycle">
+    The service actor pattern (`service_actor.rs`) manages each installed service as a long-running async actor. State transitions — install, init, start, stop, backup, uninstall — are serialized through this actor.
+  </Accordion>
+  <Accordion title="src/db/model/ — Database models">
+    `public.rs` defines the database shape that is synchronized to the frontend via Patch-DB. `private.rs` holds backend-only state that is never exposed over the wire.
+  </Accordion>
+  <Accordion title="src/net/ — Networking">
+    Covers DNS, ACME/SSL certificate management, mDNS, WiFi, Tor (via Arti), and WireGuard tunnels. Each subsystem is a submodule under `src/net/` with its own RPC handlers.
+  </Accordion>
+  <Accordion title="src/s9pk/ — Package format">
+    Implements the S9PK v2 merkle archive: parsing, packing, cryptographic verification, and streaming downloads. See [Services and packages](/concepts/services-and-packages) for the full format description.
+  </Accordion>
+</AccordionGroup>
+
+## Build pipeline
+
+Components have a strict one-directional dependency chain. A change that starts in Rust must propagate through each layer before the frontend or container runtime can see it:
+
+```text
+Rust (core/)
+  → cargo test exports ts-rs types to core/bindings/
+    → rsync copies to sdk/base/lib/osBindings/
+      → SDK build produces baseDist/ and dist/
+        → web/ consumes baseDist/ (via @start9labs/start-sdk-base)
+        → container-runtime/ consumes dist/ (via @start9labs/start-sdk)
+```
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `cargo check -p start-os` | Verify Rust compiles |
+| 2 | `make ts-bindings` | Export `ts-rs` types and rsync to SDK |
+| 3 | `cd sdk && make baseDist dist` | Build both SDK packages |
+| 4 | `cd web && npm run check` | Type-check all Angular projects |
+| 5 | `cd container-runtime && npm run check` | Type-check the runtime |
+
+<Warning>
+  Editing files in `sdk/base/lib/osBindings/` directly is not sufficient — you must rebuild the SDK bundle (step 3) before `web/` or `container-runtime/` can see the changes.
+</Warning>
+
+## Data flow: backend to frontend
+
+StartOS uses Patch-DB to keep the UI in sync with backend state without polling:
+
+1. The backend mutates state via `db.mutate()`, producing CBOR-encoded diffs
+2. Diffs are pushed to the frontend over a persistent WebSocket connection
+3. The frontend applies diffs to its local state copy and notifies observers
+4. Angular components watch specific database paths via `PatchDB.watch$()` and receive updates reactively
+
+After any mutating RPC call, the frontend waits for the corresponding Patch-DB diff before resolving, so the UI reflects the result immediately. The `x-patch-sequence` response header carries the sequence number the frontend must wait for.
+
+## SDK architecture
+
+The SDK is split into two npm packages that form a layered architecture:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  package/ (@start9labs/start-sdk)                           │
+│  Developer-facing facade, daemon management, health checks, │
+│  backup system, file helpers, triggers, subcontainers       │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  base/ (@start9labs/start-sdk-base)                   │  │
+│  │  ABI, Effects, OS bindings, actions/input builders,   │  │
+│  │  ExVer parser, interfaces, dependencies, S9pk, utils  │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+         │                                        ▲
+         │ Effects calls (RPC)                    │ Callbacks
+         ▼                                        │
+┌─────────────────────────────────────────────────────────────┐
+│  StartOS Runtime (Rust supervisor)                          │
+│  Executes effects, manages containers, networking, storage  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The `base` package provides the ABI contract — the set of exports every service package must implement (`main`, `init`, `uninit`, `manifest`, `actions`, `createBackup`). The `package` layer wraps these with higher-level builder APIs for daemons, health checks, backups, and subcontainers.
+
+<Tip>
+  All runtime interactions go through an `Effects` object rather than direct system calls. This keeps the runtime boundary explicit and makes service code testable with mock effects.
+</Tip>

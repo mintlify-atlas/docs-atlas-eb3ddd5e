@@ -1,0 +1,157 @@
+---
+title: "Backups, Storage, and Data Integrity in StartOS"
+description: "How StartOS manages persistent volumes, runs encrypted rsync-based backups, supports multiple backup destinations, and verifies data integrity."
+---
+
+StartOS separates service data from service code. Container images are ephemeral and can be replaced during updates; persistent application state lives in named *volumes* that survive the container lifecycle. The backup system snapshots those volumes to an encrypted destination — a local USB drive, a network share, or a cloud storage provider — and restores from them when reinstalling or migrating to a new device. All backups are cryptographically verified to detect corruption or tampering.
+
+## Volumes: persistent data storage
+
+A volume is a named directory that is mounted into a service's LXC container at a fixed path. Volumes are declared in the package manifest and created on first install:
+
+```json
+{
+  "volumes": ["main", "data", "cache"]
+}
+```
+
+At runtime, each volume name maps to a host filesystem path that persists across container restarts, updates, and reinstalls. The SDK's `Mounts` builder makes it explicit which volumes are attached and where:
+
+```typescript
+sdk.Mounts.of()
+  .mountVolume('main', '/data')
+  .mountVolume('cache', '/var/cache')
+  .mountAssets('scripts', '/usr/local/scripts')
+  .mountDependency('bitcoind', 'main', '/bitcoin-data', { readonly: true })
+```
+
+Volumes are the only persistent storage available to services. Everything written to the container filesystem outside a mounted volume is discarded when the container stops. This design makes it straightforward to enumerate exactly what needs to be backed up: the set of declared volumes.
+
+## Backup system
+
+StartOS uses rsync to back up service volumes. When the user triggers a backup, the host daemon invokes each service's `createBackup` export, which runs the SDK backup logic inside the container and rsyncs the volume contents to a backup-specific mount point at `/backup` inside the container.
+
+The SDK provides three patterns for configuring backups:
+
+<Tabs>
+  <Tab title="By volume name">
+    The most common pattern. Backs up one or more named volumes in their entirety:
+
+    ```typescript
+    export const createBackup: T.ExpectedExports.createBackup =
+      sdk.setupBackups(sdk.Backups.ofVolumes('main', 'data'))
+    ```
+
+    `Backups.ofVolumes()` translates each volume name into the correct host path and runs rsync with safe defaults.
+  </Tab>
+  <Tab title="Custom sync pairs">
+    For services that need to back up specific subdirectories or map paths differently:
+
+    ```typescript
+    export const createBackup: T.ExpectedExports.createBackup =
+      sdk.setupBackups(
+        sdk.Backups.ofSyncs([
+          { dataPath: '/data/wallets', backupPath: 'wallets' },
+          { dataPath: '/data/config', backupPath: 'config' },
+        ])
+      )
+    ```
+  </Tab>
+  <Tab title="With rsync options">
+    For fine-grained control, including excluding cache directories that do not need to be backed up:
+
+    ```typescript
+    export const createBackup: T.ExpectedExports.createBackup =
+      sdk.setupBackups(
+        sdk.Backups.ofVolumes('main').withOptions({
+          exclude: ['cache/', 'tmp/', '*.log'],
+        })
+      )
+    ```
+  </Tab>
+</Tabs>
+
+## Backup destinations
+
+StartOS supports several backup destinations. The user configures a destination in the admin UI; all destinations are encrypted with a password the user controls before any data leaves the device.
+
+<AccordionGroup>
+  <Accordion title="Local USB drive">
+    The simplest option. StartOS detects attached USB storage and presents it as a backup target. Suitable for users who want an air-gapped backup they physically control.
+  </Accordion>
+  <Accordion title="Network share (SMB/CIFS)">
+    Back up to a NAS, another computer on the local network, or any SMB-compatible network share. StartOS mounts the share before the backup and unmounts it after, so the share does not need to be permanently attached.
+  </Accordion>
+  <Accordion title="Cloud storage (Nextcloud and compatible)">
+    StartOS supports WebDAV-compatible cloud storage providers, including Nextcloud. This enables off-site backups that survive local hardware failures. The data is encrypted on the device before upload, so the cloud provider never has access to plaintext.
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  The backup encryption password cannot be recovered if lost. Store it separately from the backup destination — for example, in a password manager. Without the password, a backup is unreadable.
+</Warning>
+
+## Encryption and data integrity
+
+Backups are encrypted before being written to the destination. The encryption key is derived from the user-supplied password using a strong key derivation function, so a weak destination (e.g. a cloud provider with a security incident) does not expose plaintext service data.
+
+The S9PK package format uses blake3 merkle hashing for all archive content, and the archive is signed with an Ed25519 key. This ensures that the package installed on a device is byte-for-byte identical to what the developer published — any modification, accidental or malicious, is detectable at install time.
+
+For service data specifically, each rsync run computes checksums over the transferred files. StartOS validates these checksums after transfer to confirm that the backup destination received intact data.
+
+## Restore process
+
+Restoring from a backup happens during service installation or device migration:
+
+<Steps>
+  <Step title="Select backup source">
+    The user points StartOS at a backup destination — USB, network share, or cloud — and enters the encryption password.
+  </Step>
+  <Step title="Choose service backups to restore">
+    StartOS lists the backed-up services found in the destination. The user selects which services to restore.
+  </Step>
+  <Step title="Install and restore">
+    StartOS installs the service package (downloading it from the marketplace if needed), then invokes the `init` export with `kind: 'restore'`. The init script receives access to the backup mount and rsync the saved data back into the service's volumes.
+  </Step>
+  <Step title="Service resumes">
+    Once init completes, the service starts normally. Because the volume data is restored, the service picks up exactly where it left off — accounts, configuration, and application state intact.
+  </Step>
+</Steps>
+
+The `init` export receives the `kind` value so that restore-specific logic can be branched:
+
+```typescript
+export const init: T.ExpectedExports.init = async ({ effects, input }) => {
+  const kind = input?.kind
+
+  if (kind === 'restore') {
+    // Volume data is already in place from the backup restore.
+    // Run any post-restore migrations here.
+  } else if (kind === 'install') {
+    // First-time setup.
+  } else if (kind === 'update') {
+    // Data migration between versions.
+  }
+
+  await sdk.setupDependencies(effects, dependencies)
+  await sdk.setupInterfaces(effects, interfaces)
+}
+```
+
+## Data versioning
+
+The SDK provides `setDataVersion` and `getDataVersion` to track which migration version a service's data has been brought to. This is used in init scripts to run incremental migrations during updates without re-running migrations that have already been applied:
+
+```typescript
+import { ExtendedVersion } from '@start9labs/start-sdk'
+
+const current = await sdk.getDataVersion(effects)
+const v2 = ExtendedVersion.parse('2.0.0:0')
+
+if (!current || ('lessThan' in current && current.lessThan(v2))) {
+  await runMigrationToV2(effects)
+  await sdk.setDataVersion(effects, v2)
+}
+```
+
+Version comparisons use the ExVer format described in [Services and packages](/concepts/services-and-packages), so both upstream and downstream versions can gate migrations independently.

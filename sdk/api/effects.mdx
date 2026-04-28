@@ -1,0 +1,684 @@
+---
+title: "Effects interface: StartOS runtime bridge"
+description: "Reference for the Effects interface — the capability system bridging service TypeScript to the StartOS runtime for networking, storage, health, and SSL."
+---
+
+The `Effects` interface is the sole channel through which service code reaches the StartOS runtime. Every lifecycle hook — `main`, `init`, `uninit`, `createBackup`, and actions — receives an `Effects` object as its entry point. Rather than making direct system calls, your service code calls methods on `Effects`, which the runtime mediates, enforces, and records. This design makes the runtime boundary explicit, enables the OS to supervise all side effects, and lets you substitute a mock `Effects` in tests.
+
+The interface is defined in `base/lib/Effects.ts` and is organized into ten subsystems.
+
+<Note>
+  Most `Effects` methods are accessed indirectly through the typed wrappers on the `StartSdk` facade (e.g. `sdk.restart`, `sdk.setHealth`). Use the raw `Effects` object directly only when you need a method not yet surfaced by the facade.
+</Note>
+
+## Reactive subscription pattern
+
+Many `Effects` methods accept an optional `callback` parameter. When provided, the runtime calls your callback whenever the underlying value changes. The SDK wraps this low-level mechanism in the `Watchable` base class, which exposes four higher-level strategies:
+
+| Method | Behavior |
+|--------|----------|
+| `const()` | Read once. If the value changes, triggers a retry of the enclosing reactive context. |
+| `once()` | Read once with no reactivity. |
+| `watch(abort?)` | Returns an async generator that yields on each change. |
+| `onChange(callback)` | Invokes a callback on each change; return `{ cancel: true }` to stop. |
+| `waitFor(predicate)` | Blocks until the predicate returns `true` for a yielded value. |
+
+The following reactive wrappers are pre-built around common `Effects` methods: `GetContainerIp`, `GetStatus`, `GetSystemSmtp`, `GetOutboundGateway`, `GetSslCertificate`, `GetHostInfo`, `GetServiceManifest`. The `StartSdk` facade exposes these as `sdk.getContainerIp(effects)`, `sdk.getStatus(effects)`, etc., returning a `Watchable` instance.
+
+```typescript
+// Read once, retry context on change
+const ip = await sdk.getContainerIp(effects).const()
+
+// Stream all future changes
+for await (const ip of sdk.getContainerIp(effects).watch()) {
+  console.log('Container IP changed:', ip)
+}
+
+// Callback on change, cancellable
+sdk.getContainerIp(effects).onChange((ip) => {
+  configFile.merge({ proxyTarget: ip })
+  return { cancel: false }
+})
+
+// Block until non-loopback IP
+const ip = await sdk.getContainerIp(effects).waitFor(
+  (ip) => !ip.startsWith('127.')
+)
+```
+
+---
+
+## Action subsystem
+
+Registered actions appear in the StartOS UI where users can trigger them. All action registration should happen during `init`.
+
+<AccordionGroup>
+  <Accordion title="effects.action.export">
+    Register an action with the OS so it appears in the user interface.
+
+    ```typescript
+    effects.action.export(options: {
+      id: ActionId
+      metadata: ActionMetadata
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.id" type="ActionId" required>
+      Unique string identifier for the action within this service.
+    </ParamField>
+    <ParamField path="options.metadata" type="ActionMetadata" required>
+      Name, description, visibility, allowed statuses, warning, group, and `hasInput` flag.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.action.clear">
+    Remove all registered actions except those in the `except` list. Call after exporting all actions during `init` to remove any stale entries from a previous version.
+
+    ```typescript
+    effects.action.clear(options: {
+      except: ActionId[]
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.except" type="ActionId[]" required>
+      Action IDs to keep. All others are removed.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.action.getInput">
+    Retrieve the current input for an action, optionally from another package.
+
+    ```typescript
+    effects.action.getInput(options: {
+      packageId?: PackageId
+      actionId: ActionId
+    }): Promise<ActionInput | null>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId">
+      Target package. Defaults to the current service.
+    </ParamField>
+    <ParamField path="options.actionId" type="ActionId" required>
+      The action whose input to retrieve.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.action.run">
+    Programmatically execute an action, optionally on another package.
+
+    ```typescript
+    effects.action.run<Input extends Record<string, unknown>>(options: {
+      packageId?: PackageId
+      actionId: ActionId
+      input?: Input
+    }): Promise<ActionResult | null>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId">
+      Target package. Defaults to the current service.
+    </ParamField>
+    <ParamField path="options.actionId" type="ActionId" required>
+      The action to execute.
+    </ParamField>
+    <ParamField path="options.input" type="Input">
+      Optional input values to pass to the action.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.action.createTask">
+    Create a task notification that appears in the StartOS task center, prompting the user to run an action.
+
+    ```typescript
+    effects.action.createTask(options: CreateTaskParams): Promise<null>
+    ```
+
+    <ParamField path="options" type="CreateTaskParams" required>
+      Includes `packageId`, `actionId`, `severity`, `replayId`, and optional pre-fill data. See `osBindings` for the full `CreateTaskParams` type.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.action.clearTasks">
+    Remove task notifications by replay ID.
+
+    ```typescript
+    effects.action.clearTasks(
+      options: { only: string[] } | { except: string[] }
+    ): Promise<null>
+    ```
+
+    <ParamField path="options" type="object" required>
+      Pass `{ only: [...replayIds] }` to remove specific tasks, or `{ except: [...replayIds] }` to remove all others.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Control subsystem
+
+Service lifecycle control — restart, shutdown, and status queries.
+
+<AccordionGroup>
+  <Accordion title="effects.restart">
+    Restart this service's main function.
+
+    ```typescript
+    effects.restart(): Promise<null>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.shutdown">
+    Stop this service's main function.
+
+    ```typescript
+    effects.shutdown(): Promise<null>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.getStatus">
+    Query the current runtime status of a service. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getStatus(options: {
+      packageId?: PackageId
+      callback?: () => void
+    }): Promise<StatusInfo | null>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId">
+      Target package. Defaults to the current service.
+    </ParamField>
+    <ParamField path="options.callback" type="() => void">
+      Called when the status changes. Use `sdk.getStatus(effects)` for the full reactive API.
+    </ParamField>
+
+    <Tip>
+      Prefer `sdk.getStatus(effects).const()` over calling this directly.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="effects.setMainStatus">
+    Indicate to the OS what run-state the service is in.
+
+    ```typescript
+    effects.setMainStatus(options: SetMainStatus): Promise<null>
+    ```
+
+    <ParamField path="options" type="SetMainStatus" required>
+      The run-state to report. See `osBindings/SetMainStatus` for the valid values.
+    </ParamField>
+
+    <Warning>
+      This method is deprecated. The SDK daemon management system sets the main status automatically.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Dependency subsystem
+
+Declare and verify inter-service dependencies at runtime.
+
+<AccordionGroup>
+  <Accordion title="effects.setDependencies">
+    Set the dynamic dependency requirements for this service. Call during `init` or whenever requirements change.
+
+    ```typescript
+    effects.setDependencies(options: {
+      dependencies: Dependencies
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.dependencies" type="Dependencies" required>
+      Array of `DependencyRequirement` objects (package ID, version range, health checks, kind).
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getDependencies">
+    Return the merged dependency list — both dynamically set requirements and those declared in the manifest.
+
+    ```typescript
+    effects.getDependencies(): Promise<DependencyRequirement[]>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.checkDependencies">
+    Test whether current dependency requirements are satisfied.
+
+    ```typescript
+    effects.checkDependencies(options: {
+      packageIds?: PackageId[]
+    }): Promise<CheckDependenciesResult[]>
+    ```
+
+    <ParamField path="options.packageIds" type="PackageId[]">
+      Subset of dependency IDs to check. Defaults to all dependencies.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.mount">
+    Mount a volume from a dependency package into this service's filesystem.
+
+    ```typescript
+    effects.mount(options: MountParams): Promise<string>
+    ```
+
+    <ParamField path="options" type="MountParams" required>
+      Includes `packageId`, `volumeId`, `path`, and `readonly`. See `osBindings/MountParams`.
+    </ParamField>
+
+    Returns the filesystem path where the volume was mounted.
+  </Accordion>
+
+  <Accordion title="effects.getInstalledPackages">
+    Return a list of IDs for all currently installed packages on the system.
+
+    ```typescript
+    effects.getInstalledPackages(): Promise<string[]>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.getServiceManifest">
+    Return the manifest of any installed service. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getServiceManifest(options: {
+      packageId: PackageId
+      callback?: () => void
+    }): Promise<Manifest>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId" required>
+      The package whose manifest to retrieve.
+    </ParamField>
+    <ParamField path="options.callback" type="() => void">
+      Called when the manifest changes. Use `sdk.getServiceManifest(effects, packageId)` for the full reactive API.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Health subsystem
+
+Report health check results back to the OS.
+
+<AccordionGroup>
+  <Accordion title="effects.setHealth">
+    Report the result of a health check. The OS displays this status in the service card.
+
+    ```typescript
+    effects.setHealth(o: SetHealth): Promise<null>
+    ```
+
+    <ParamField path="o" type="SetHealth" required>
+      Includes `name` (health check ID), `result` (`success | loading | starting | failure | disabled`), and an optional `message`. See `osBindings/SetHealth`.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Subcontainer subsystem
+
+Low-level filesystem APIs used internally by `SubContainer`. Prefer `sdk.SubContainer.of()` or `sdk.SubContainer.withTemp()` in service code.
+
+<AccordionGroup>
+  <Accordion title="effects.subcontainer.createFs">
+    Create an isolated container filesystem layer based on a manifest image.
+
+    ```typescript
+    effects.subcontainer.createFs(options: {
+      imageId: string
+      name: string | null
+    }): Promise<[string, string]>
+    ```
+
+    Returns a tuple of `[guid, mountPath]`. The GUID is required by `destroyFs`.
+  </Accordion>
+
+  <Accordion title="effects.subcontainer.destroyFs">
+    Destroy a previously created container filesystem layer, freeing its resources.
+
+    ```typescript
+    effects.subcontainer.destroyFs(options: {
+      guid: string
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.guid" type="string" required>
+      The GUID returned by `createFs`.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Networking subsystem
+
+Port binding, host discovery, and network address queries.
+
+<AccordionGroup>
+  <Accordion title="effects.bind">
+    Create a host binding for the specified port with the given options. Must be called before exporting a service interface on that port.
+
+    ```typescript
+    effects.bind(options: BindParams): Promise<null>
+    ```
+
+    <ParamField path="options" type="BindParams" required>
+      Includes `kind` (`multi`), `id` (host ID), `internalPort`, and `protocol` (`http | https | tcp | udp`). See `osBindings/BindParams`.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getServicePortForward">
+    Return the external address (hostname + port) at which a service's host is reachable.
+
+    ```typescript
+    effects.getServicePortForward(options: {
+      packageId?: PackageId
+      hostId: HostId
+      internalPort: number
+    }): Promise<NetInfo>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId">
+      Target package. Defaults to the current service.
+    </ParamField>
+    <ParamField path="options.hostId" type="HostId" required>
+      The host ID whose forwarded address to retrieve.
+    </ParamField>
+    <ParamField path="options.internalPort" type="number" required>
+      The internal container port.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.clearBindings">
+    Remove all network bindings except those in the `except` list. Call during `init` to clean up stale bindings from prior versions.
+
+    ```typescript
+    effects.clearBindings(options: {
+      except: { id: HostId; internalPort: number }[]
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.except" type="object[]" required>
+      Array of `{ id, internalPort }` pairs identifying bindings to preserve.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getHostInfo">
+    Return metadata about a specific host (hostnames, IP addresses, LAN/Tor status). Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getHostInfo(options: {
+      packageId?: PackageId
+      hostId: HostId
+      callback?: () => void
+    }): Promise<Host | null>
+    ```
+
+    <ParamField path="options.packageId" type="PackageId">
+      Target package. Defaults to the current service.
+    </ParamField>
+    <ParamField path="options.hostId" type="HostId" required>
+      The host ID to query.
+    </ParamField>
+    <ParamField path="options.callback" type="() => void">
+      Called when host info changes.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getContainerIp">
+    Return the IP address of this container (or another package's container). Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getContainerIp(options: {
+      packageId?: PackageId
+      callback?: () => void
+    }): Promise<string>
+    ```
+
+    <Tip>
+      Prefer `sdk.getContainerIp(effects).const()` for reactive config generation.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="effects.getOsIp">
+    Return the IP address of the StartOS host.
+
+    ```typescript
+    effects.getOsIp(): Promise<string>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.getOutboundGateway">
+    Return the effective outbound network gateway for this service. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getOutboundGateway(options: {
+      callback?: () => void
+    }): Promise<string>
+    ```
+
+    <Tip>
+      Prefer `sdk.getOutboundGateway(effects).const()`.
+    </Tip>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Interfaces subsystem
+
+Export and query network endpoints that users see in the StartOS UI.
+
+<AccordionGroup>
+  <Accordion title="effects.exportServiceInterface">
+    Publish a service interface, binding it to a specific host and port so it appears to the user.
+
+    ```typescript
+    effects.exportServiceInterface(
+      options: ExportServiceInterfaceParams
+    ): Promise<null>
+    ```
+
+    <ParamField path="options" type="ExportServiceInterfaceParams" required>
+      Full interface definition: `id`, `name`, `description`, `type`, `hostId`, `internalPort`, `scheme`, and optional path/query/username overrides. See `osBindings/ExportServiceInterfaceParams`.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getServiceInterface">
+    Return a single exported interface by its ID. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getServiceInterface(options: {
+      packageId?: PackageId
+      serviceInterfaceId: ServiceInterfaceId
+      callback?: () => void
+    }): Promise<ServiceInterface | null>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.listServiceInterfaces">
+    Return all exported interfaces for a package as a record keyed by interface ID. Accepts an optional `callback`.
+
+    ```typescript
+    effects.listServiceInterfaces(options: {
+      packageId?: PackageId
+      callback?: () => void
+    }): Promise<Record<ServiceInterfaceId, ServiceInterface>>
+    ```
+  </Accordion>
+
+  <Accordion title="effects.clearServiceInterfaces">
+    Remove all service interfaces except those listed. Call during `init` to remove stale interfaces from prior versions.
+
+    ```typescript
+    effects.clearServiceInterfaces(options: {
+      except: ServiceInterfaceId[]
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.except" type="ServiceInterfaceId[]" required>
+      Interface IDs to preserve. All others are removed.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Plugin subsystem
+
+The plugin subsystem is gated by the `plugins` field in your service manifest. Methods are only accessible when the relevant plugin is declared. The `url-v0` plugin enables URL management — exporting clickable addresses to the StartOS UI.
+
+<AccordionGroup>
+  <Accordion title="effects.plugin.url.register">
+    Register the URL plugin, binding it to an action that handles URL-related table interactions.
+
+    ```typescript
+    effects.plugin.url.register(options: {
+      tableAction: ActionId
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.tableAction" type="ActionId" required>
+      The action ID for the URL plugin's table action handler.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.plugin.url.exportUrl">
+    Export a URL entry with associated actions for removal and overflow.
+
+    ```typescript
+    effects.plugin.url.exportUrl(options: {
+      hostnameInfo: PluginHostnameInfo
+      removeAction: ActionId | null
+      overflowActions: ActionId[]
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.hostnameInfo" type="PluginHostnameInfo" required>
+      Hostname, package, interface, host, and port metadata for the URL entry.
+    </ParamField>
+    <ParamField path="options.removeAction" type="ActionId | null" required>
+      Action ID to invoke when the user removes this URL, or `null` if removal is not supported.
+    </ParamField>
+    <ParamField path="options.overflowActions" type="ActionId[]" required>
+      Additional action IDs shown in the URL entry's overflow menu.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.plugin.url.clearUrls">
+    Remove all exported URL entries except those specified.
+
+    ```typescript
+    effects.plugin.url.clearUrls(options: {
+      except: PluginHostnameInfo[]
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.except" type="PluginHostnameInfo[]" required>
+      Hostname info entries to preserve.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## SSL subsystem
+
+Obtain TLS certificates and private keys issued by the StartOS certificate authority.
+
+<AccordionGroup>
+  <Accordion title="effects.getSslCertificate">
+    Return a PEM-encoded full certificate chain for the given hostnames. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getSslCertificate(options: {
+      hostnames: string[]
+      algorithm?: 'ecdsa' | 'ed25519'
+      callback?: () => void
+    }): Promise<[string, string, string]>
+    ```
+
+    <ParamField path="options.hostnames" type="string[]" required>
+      List of hostnames (e.g. `.onion` addresses or LAN hostnames) to include in the certificate.
+    </ParamField>
+    <ParamField path="options.algorithm" type="'ecdsa' | 'ed25519'">
+      Key algorithm preference. Defaults to ECDSA.
+    </ParamField>
+    <ParamField path="options.callback" type="() => void">
+      Called when the certificate is renewed. Use `sdk.getSslCertificate(effects, hostnames)` for the full reactive API.
+    </ParamField>
+
+    Returns a tuple of `[certificate, intermediates, root]` in PEM format.
+  </Accordion>
+
+  <Accordion title="effects.getSslKey">
+    Return the PEM-encoded private key corresponding to the SSL certificate for the given hostnames.
+
+    ```typescript
+    effects.getSslKey(options: {
+      hostnames: string[]
+      algorithm?: 'ecdsa' | 'ed25519'
+    }): Promise<string>
+    ```
+
+    <ParamField path="options.hostnames" type="string[]" required>
+      Hostnames that the key covers. Must match a prior `getSslCertificate` call.
+    </ParamField>
+    <ParamField path="options.algorithm" type="'ecdsa' | 'ed25519'">
+      Key algorithm. Must match the algorithm used in `getSslCertificate`.
+    </ParamField>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## System subsystem
+
+System-wide configuration access and data version management.
+
+<AccordionGroup>
+  <Accordion title="effects.getSystemSmtp">
+    Return the globally configured SMTP settings, if the user has provided them. Accepts an optional `callback` for reactive subscriptions.
+
+    ```typescript
+    effects.getSystemSmtp(options: {
+      callback?: () => void
+    }): Promise<SmtpValue | null>
+    ```
+
+    Returns `null` if no system SMTP is configured. The `SmtpValue` type contains `host`, `port`, `from`, `username`, `password`, and `security`.
+
+    <Tip>
+      Prefer `sdk.getSystemSmtp(effects).const()` to automatically retry your config generation when SMTP settings change.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="effects.setDataVersion">
+    Persist the data migration version for this service. Call at the end of each migration step during `init`.
+
+    ```typescript
+    effects.setDataVersion(options: {
+      version: string | null
+    }): Promise<null>
+    ```
+
+    <ParamField path="options.version" type="string | null" required>
+      An ExVer version string (e.g. `'1.2.0:0'`) identifying how far data has been migrated, or `null` to clear it.
+    </ParamField>
+  </Accordion>
+
+  <Accordion title="effects.getDataVersion">
+    Return the data migration version previously set by `setDataVersion`.
+
+    ```typescript
+    effects.getDataVersion(): Promise<string | null>
+    ```
+
+    Returns `null` if no version has been set (i.e. fresh install with no prior migration).
+  </Accordion>
+</AccordionGroup>

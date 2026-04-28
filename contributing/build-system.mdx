@@ -1,0 +1,126 @@
+---
+title: "StartOS Build System: Targets, Variables, and Pipeline"
+description: "Understand the GNU Make–based build system, environment variables, cross-layer dependency order, and how to deploy builds to a device."
+---
+
+StartOS uses GNU Make to coordinate a multi-language build pipeline that spans Rust, TypeScript, and Docker. Every build artifact — from installable ISO images to individual TypeScript binding files — is produced by a named make target. Understanding the dependency chain between layers lets you rebuild only what changed and deploy to a device in seconds.
+
+## Environment variables
+
+Set these variables before invoking any make target. The `PLATFORM` value is remembered between builds if you do not specify it again.
+
+| Variable | Values | Description |
+|---|---|---|
+| `PLATFORM` | `x86_64`, `x86_64-nonfree`, `aarch64`, `aarch64-nonfree`, `riscv64`, `raspberrypi` | Target hardware platform |
+| `ENVIRONMENT` | `dev`, `unstable`, `console` (hyphen-separated) | Feature flags controlling debug capabilities |
+| `PROFILE` | `release` (default), `dev` | Rust build profile |
+| `GIT_BRANCH_AS_HASH` | `1` | Uses the git branch name as the version hash; prevents rebuilds on every commit |
+
+**ENVIRONMENT flags:**
+
+- `dev` — enables password SSH before setup and skips frontend compression
+- `unstable` — enables assertions and debugging with a performance penalty
+- `console` — enables tokio-console for async runtime debugging
+
+**Platform notes:**
+
+- `-nonfree` variants include proprietary firmware and drivers
+- `raspberrypi` includes non-free components by necessity and produces an `.img` instead of an `.iso`
+
+## Build targets
+
+These targets produce distributable artifacts.
+
+| Target | Description |
+|---|---|
+| `iso` | Create a full `.iso` image (all platforms except raspberrypi) |
+| `img` | Create a full `.img` image (raspberrypi only) |
+| `deb` | Build a Debian package |
+| `all` | Build all Rust binaries |
+| `uis` | Build all web UIs |
+| `ui` | Build the main UI only |
+| `ts-bindings` | Generate TypeScript bindings from Rust types via ts-rs |
+
+<CodeGroup>
+
+```bash Build ISO (x86_64)
+PLATFORM=x86_64 ENVIRONMENT=dev make iso
+```
+
+```bash Build Debian package
+PLATFORM=x86_64 make deb
+```
+
+```bash Build all Rust binaries
+make all
+```
+
+```bash Regenerate TypeScript bindings
+make ts-bindings
+```
+
+</CodeGroup>
+
+## Deployment targets
+
+Deploy directly to a device on your local network by passing `REMOTE=start9@<ip>`. The fastest workflow for iterating on code is `update-startbox`, which transfers only the compiled binary and UI assets.
+
+| Target | Command | Description |
+|---|---|---|
+| `update-startbox` | `make update-startbox REMOTE=start9@<ip>` | Deploy binary + UI only — fastest iteration |
+| `update-deb` | `make update-deb REMOTE=start9@<ip>` | Deploy the full Debian package |
+| `update` | `make update REMOTE=start9@<ip>` | OTA-style update |
+| `reflash` | `make reflash REMOTE=start9@<ip>` | Reflash as if using the live ISO |
+| `update-overlay` | `make update-overlay REMOTE=start9@<ip>` | Deploy to the in-memory overlay (reverts on reboot) |
+
+```bash
+# Fastest way to test a code change on a running device
+make update-startbox REMOTE=start9@<ip>
+```
+
+<Tip>
+Use `update-overlay` when you want to test a risky change without permanently modifying the device. The overlay reverts automatically on the next reboot.
+</Tip>
+
+## Wormhole targets
+
+For devices on a different network, use [magic-wormhole](https://github.com/magic-wormhole/magic-wormhole) to transfer artifacts out-of-band.
+
+| Target | Description |
+|---|---|
+| `wormhole` | Send the startbox binary |
+| `wormhole-deb` | Send the Debian package |
+| `wormhole-squashfs` | Send the squashfs image |
+
+## Cross-layer build pipeline
+
+Components have a strict dependency chain. A change in a lower layer must propagate upward before the higher layers reflect it. Always verify changes in this order:
+
+```
+Rust (core/)
+  → cargo test exports ts-rs types → core/bindings/
+    → rsync copies to sdk/base/lib/osBindings/
+      → SDK build produces baseDist/ and dist/
+        → web/ consumes baseDist/ (via @start9labs/start-sdk-base)
+        → container-runtime/ consumes dist/ (via @start9labs/start-sdk)
+```
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `cargo check -p start-os` | Verify Rust compiles |
+| 2 | `make ts-bindings` | Export ts-rs types and rsync them to the SDK |
+| 3 | `cd sdk && make baseDist dist` | Build SDK packages consumed by web and container-runtime |
+| 4 | `cd web && npm run check` | Type-check all Angular projects |
+| 5 | `cd container-runtime && npm run check` | Type-check the container runtime |
+
+<Warning>
+Editing files in `sdk/base/lib/osBindings/` directly is not sufficient. You must run `make ts-bindings` followed by `cd sdk && make baseDist dist` for downstream layers to see the change.
+</Warning>
+
+## Other targets
+
+| Target | Description |
+|---|---|
+| `format` | Run code formatting (Rust nightly required) |
+| `test` | Run all automated tests |
+| `clean` | Delete all compiled artifacts |

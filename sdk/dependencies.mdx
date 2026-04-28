@@ -1,0 +1,201 @@
+---
+title: "Service Dependencies: Declaring Inter-Service Requirements"
+description: "Declare version-ranged requirements on other StartOS services, mount their volumes, and use checkDependencies to verify health at runtime."
+---
+
+StartOS services can depend on each other. A Lightning node depends on a Bitcoin node. A block explorer depends on both. The SDK's dependency system lets you declare those relationships formally: the OS uses your declarations to enforce installation order, prompt users to install missing dependencies, and block your service from starting if a required dependency is unhealthy. At runtime, `checkDependencies` gives you typed access to each dependency's installed version, running state, and health check results so you can produce meaningful error messages and halt gracefully when something is wrong.
+
+## Declaring dependencies
+
+`setupDependencies` is a function that returns your service's current dependency requirements. It is called during `init` so that the OS always has an up-to-date picture of what your service needs.
+
+```typescript
+export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
+  return {
+    bitcoind: {
+      kind: 'running',
+      versionRange: '>=0.21.0:0',
+      healthChecks: ['synced'],
+    },
+    electrs: {
+      kind: 'exists',
+      versionRange: '>=0.9.0:0',
+    },
+  }
+})
+```
+
+<Note>
+Call `setDependencies(effects)` inside your `setupInit` function so that the OS registers your requirements on every install, update, and restore.
+</Note>
+
+## Dependency requirement kinds
+
+Each dependency entry uses one of two `kind` values:
+
+| Kind | When to use |
+|---|---|
+| `running` | Your service requires the dependency to be actively running. You can also require specific health checks to be passing. |
+| `exists` | Your service only requires the dependency to be installed (not necessarily running). Useful for optional integrations or migration tools. |
+
+```typescript
+// Require bitcoind to be running AND have its 'synced' health check passing
+bitcoind: {
+  kind: 'running',
+  versionRange: '>=0.21.0:0',
+  healthChecks: ['synced'],
+}
+
+// Only require lnd to be installed
+lnd: {
+  kind: 'exists',
+  versionRange: '>=0.16.0:0',
+}
+```
+
+## Version ranges
+
+StartOS uses Extended Version (ExVer) format for version ranges. ExVer extends semver with an optional flavor prefix and a downstream version component (`upstream:downstream`). Version ranges support boolean expressions.
+
+```typescript
+// At least version 0.21.0 with any downstream version
+versionRange: '>=0.21.0:0'
+
+// Specific range with an upper bound
+versionRange: '>=0.21.0:0 && <0.23.0:0'
+
+// Multiple acceptable versions
+versionRange: '>=0.21.0:0 || =0.20.99:5'
+```
+
+<Tip>
+Use `>=X.Y.Z:0` as the most common pattern. It accepts any downstream packaging version of the upstream software at or above your minimum. See the [versioning docs](/sdk/versioning) for full ExVer syntax.
+</Tip>
+
+## Mounting dependency volumes
+
+Your service can mount another service's volumes read-only. This is how you access a dependency's data files directly — for example, reading Bitcoin Core's block data from a Lightning node.
+
+Use `Mounts.of().mountDependency()` when configuring daemons:
+
+```typescript
+sdk.Mounts.of()
+  .mountVolume('main', '/data')
+  .mountDependency('bitcoind', 'main', '/bitcoin-data', { readonly: true })
+```
+
+Parameters for `mountDependency`:
+
+| Parameter | Description |
+|---|---|
+| `packageId` | The ID of the dependency package (e.g. `'bitcoind'`) |
+| `volumeId` | The volume name within the dependency's manifest |
+| `mountPath` | The path inside your container where the volume is mounted |
+| `options.readonly` | Set to `true` to prevent your service from writing to the dependency's volume |
+
+<Note>
+Always mount dependency volumes with `readonly: true` unless you have a specific reason to write to them. Writing to another service's volume can corrupt its data.
+</Note>
+
+## Checking dependencies at runtime
+
+`checkDependencies(effects)` queries the OS for the current state of all declared dependencies and returns a typed object you can use to verify requirements before proceeding.
+
+```typescript
+const deps = await sdk.checkDependencies(effects)
+
+// Check if all dependencies are satisfied
+if (!deps.satisfied()) {
+  deps.throwIfNotSatisfied() // Throws a descriptive error
+}
+
+// Check a specific dependency
+if (!deps.installedSatisfied('bitcoind')) {
+  throw new Error('Bitcoin Core is not installed')
+}
+
+if (!deps.runningSatisfied('bitcoind')) {
+  throw new Error('Bitcoin Core is not running')
+}
+
+if (!deps.healthCheckSatisfied('bitcoind', 'synced')) {
+  throw new Error('Bitcoin Core has not finished syncing')
+}
+```
+
+### CheckDependencies API
+
+| Method | Description |
+|---|---|
+| `satisfied()` | Returns `true` if all declared dependencies are fully satisfied |
+| `satisfied(packageId)` | Returns `true` if the specified dependency is fully satisfied |
+| `installedSatisfied(packageId)` | Returns `true` if the package is installed |
+| `installedVersionSatisfied(packageId)` | Returns `true` if the installed version matches the declared range |
+| `runningSatisfied(packageId)` | Returns `true` if the package is running (for `kind: 'running'` deps) |
+| `healthCheckSatisfied(packageId, healthCheckId?)` | Returns `true` if the specified health check (or all required health checks) are passing |
+| `throwIfNotSatisfied(packageId?)` | Throws a descriptive `Error` if any requirement is unmet |
+| `throwIfInstalledNotSatisfied(packageId)` | Throws if the package is not installed |
+| `throwIfInstalledVersionNotSatisfied(packageId)` | Throws if the installed version is out of range |
+| `throwIfRunningNotSatisfied(packageId)` | Throws if the package is not running |
+| `throwIfHealthNotSatisfied(packageId, healthCheckId?)` | Throws if any required health check is failing |
+
+## Querying installed packages
+
+You can query the OS about other installed packages using `effects.getInstalledPackages()` and `effects.getServiceManifest()`.
+
+```typescript
+// One-time read of a dependency's manifest
+const manifest = await sdk.getServiceManifest('bitcoind').once()
+
+// Reactive: retries the calling context if the manifest changes
+const manifest = await sdk.getServiceManifest('bitcoind').const(effects)
+
+// Watch for changes as an async generator
+for await (const manifest of sdk.getServiceManifest('bitcoind').watch(effects)) {
+  console.log('Bitcoin Core manifest updated:', manifest?.version)
+}
+```
+
+The `getServiceManifest` wrapper implements the `Watchable` reactive API — the same `const()`, `once()`, `watch()`, `onChange()`, and `waitFor()` methods available on all reactive values in the SDK.
+
+## Complete example
+
+```typescript
+import { sdk } from './sdk'
+import { configFile } from './files'
+
+// Declare dependencies during init
+export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
+  return {
+    bitcoind: {
+      kind: 'running',
+      versionRange: '>=0.21.0:0',
+      healthChecks: ['synced'],
+    },
+  }
+})
+
+// Verify at startup before launching daemons
+export const main = sdk.setupMain(async ({ effects, started }) => {
+  const deps = await sdk.checkDependencies(effects)
+  deps.throwIfNotSatisfied()
+
+  // Read Bitcoin Core's RPC configuration
+  const bitcoindManifest = await sdk.getServiceManifest('bitcoind').const(effects)
+  const rpcPort = bitcoindManifest?.config?.rpcport ?? 8332
+
+  await configFile.merge(effects, {
+    bitcoinRpcPort: rpcPort,
+  })
+
+  return sdk.Daemons.of(effects)
+    .addDaemon('primary', {
+      command: ['start-service', '--config', '/data/config.yaml'],
+      mounts: sdk.Mounts.of()
+        .mountVolume('main', '/data')
+        .mountDependency('bitcoind', 'main', '/bitcoin-data', { readonly: true }),
+      ready: { display: 'Connecting to Bitcoin Core', fn: () => sdk.healthCheck.checkPortListening(effects, 8080, { successMessage: 'Service is ready', errorMessage: 'Service port is not open' }) },
+      requires: [],
+    })
+})
+```

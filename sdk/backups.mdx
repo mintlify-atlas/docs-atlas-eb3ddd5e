@@ -1,0 +1,141 @@
+---
+title: "Configuring backups and restore for your service"
+description: "Use setupBackups to define rsync-based volume snapshots with custom sync paths, exclusion patterns, and automatic restore support in a single declaration."
+---
+
+StartOS provides a built-in backup system that users trigger from the admin UI. When a backup runs, StartOS calls your service's `createBackup` export; when a user restores from a backup, it calls `restoreBackup`. Both are produced by a single call to `setupBackups()` — you declare what to back up once, and the SDK generates both sides of the operation automatically. Backups are rsync-based, making them efficient: only changed files are transferred after the first run.
+
+## The setupBackups() function
+
+`setupBackups()` takes an async factory function that returns a `Backups` configuration. It returns a `{ createBackup, restoreBackup }` object that you export from your service package:
+
+```typescript
+import { sdk } from './sdk'
+
+export const { createBackup, restoreBackup } = sdk.setupBackups(
+  async () => sdk.Backups.ofVolumes('main')
+)
+```
+
+These two exports fulfill the `createBackup` ABI contract that StartOS requires of every service package.
+
+## Three builder patterns
+
+<Tabs>
+  <Tab title="ofVolumes">
+    The simplest option: back up one or more entire named volumes. Volume names must be declared in your service manifest.
+
+    ```typescript
+    sdk.Backups.ofVolumes('main', 'data')
+    ```
+
+    StartOS rsyncs each volume's full directory tree to the backup destination. On restore, it rsyncs the backed-up data back into the volume.
+
+    <Note>
+    Volume names are type-checked against your manifest at compile time. Referencing a volume not declared in the manifest is a TypeScript error.
+    </Note>
+  </Tab>
+  <Tab title="ofSyncs">
+    For fine-grained control, specify explicit source-to-destination path pairs. Each pair maps a path inside a mounted volume (`dataPath`) to a path in the backup destination (`backupPath`).
+
+    ```typescript
+    sdk.Backups.ofSyncs([
+      { dataPath: '/data/db', backupPath: '/db' },
+      { dataPath: '/data/config', backupPath: '/config' },
+    ])
+    ```
+
+    Use this when you want to include only specific subdirectories or when your data layout doesn't map cleanly to whole-volume backups.
+  </Tab>
+  <Tab title="withOptions">
+    Layer rsync options on top of either `ofVolumes` or `ofSyncs`. The most common use is excluding directories that should not be backed up:
+
+    ```typescript
+    sdk.Backups.ofVolumes('main').withOptions({
+      exclude: ['cache/', 'tmp/', 'logs/'],
+    })
+    ```
+
+    Excluded paths follow rsync filter syntax. Relative paths are matched from the root of the synced directory.
+  </Tab>
+</Tabs>
+
+## How backup and restore work
+
+<Steps>
+  <Step title="User initiates backup from the StartOS UI">
+    The user clicks **Create Backup** on the service page. StartOS pauses the service's main processes, mounts the backup destination, and calls `createBackup`.
+  </Step>
+  <Step title="createBackup runs rsync">
+    The SDK rsyncs the declared volumes or paths to the backup mount point at `/backup`. Because rsync transfers only changed blocks after the first run, subsequent backups are fast even for large data sets.
+  </Step>
+  <Step title="Service resumes">
+    After `createBackup` returns, StartOS unmounts the backup destination and restarts the service's main processes.
+  </Step>
+  <Step title="Restore reverses the flow">
+    When the user restores from a backup, StartOS calls `restoreBackup` with the backup mount in place. The SDK rsyncs data back from `/backup` into the service's volumes, then triggers `init` with `kind === 'restore'` before restarting the service.
+  </Step>
+</Steps>
+
+## Excluding cache and temporary data
+
+Back up only what is necessary to restore a working service. Large cache directories, compiled assets, and log files add backup time and storage cost without providing recovery value. Use `withOptions` to exclude them:
+
+```typescript
+export const { createBackup, restoreBackup } = sdk.setupBackups(async () =>
+  sdk.Backups.ofVolumes('main').withOptions({
+    exclude: [
+      'cache/',
+      '.tmp/',
+      '*.log',
+      'node_modules/',
+    ],
+  })
+)
+```
+
+<Tip>
+If your service generates large files that can be recreated at startup (indexes, thumbnails, compiled caches), exclude them. A smaller backup is faster to create, transfer, and restore.
+</Tip>
+
+## Combining with init for post-restore setup
+
+After a restore completes, StartOS calls `init` with `kind === 'restore'`. Use this to run any post-restore setup that your service needs — rebuilding indexes, updating configuration from restored data, or verifying data integrity:
+
+```typescript
+export const init = sdk.setupInit(async ({ effects, kind }) => {
+  if (kind === 'restore') {
+    const mounts = sdk.Mounts.of().mountVolume('main', '/data')
+    await sdk.SubContainer.withTemp(effects, { imageId: 'main' }, mounts, 'post-restore', async (c) => {
+      await c.exec(['rebuild-search-index'])
+    })
+  }
+
+  await sdk.setupInterfaces(effects, interfaces)
+})
+```
+
+<Note>
+The backup system mounts the backup destination at `/backup` inside the container. If you are using `ofSyncs` with custom paths, make sure your `backupPath` values are relative to `/backup`.
+</Note>
+
+## Volume declaration requirements
+
+Every volume you reference in `Backups.ofVolumes()` must be declared in your service manifest under `volumes`. The SDK enforces this as a compile-time type constraint:
+
+```typescript
+// In manifest.ts
+const manifest = setupManifest({
+  id: 'my-service',
+  volumes: {
+    main: {},   // 'main' is now a valid volume name throughout the SDK
+    data: {},   // 'data' is also valid
+  },
+  // ...
+})
+
+// In backups.ts — TypeScript will error if 'logs' is not in the manifest
+export const { createBackup, restoreBackup } = sdk.setupBackups(
+  async () => sdk.Backups.ofVolumes('main', 'data')
+)
+```

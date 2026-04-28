@@ -1,0 +1,138 @@
+---
+title: "StartOS Networking: LAN, Tor, WireGuard, and SSL"
+description: "How StartOS manages DNS, automatic SSL certificates, Tor hidden services, WireGuard VPN tunnels, and per-service port bindings and network interfaces."
+---
+
+StartOS manages the full networking stack for every service running on the device. Rather than requiring users to configure routers, certificates, or DNS records by hand, StartOS handles discovery, certificate issuance, Tor registration, and VPN tunnels automatically. Services declare the ports they need, and the system makes them reachable through whichever transports are appropriate — local network, Tor, or WireGuard — with TLS everywhere.
+
+## The networking stack
+
+The networking subsystem lives in `core/src/net/` and covers six distinct concerns, each implemented as a separate module:
+
+<CardGroup cols={2}>
+  <Card title="DNS" icon="globe">
+    Internal DNS resolution for `.local` hostnames and service-to-service addressing inside the LXC network. The `dns.rs` module manages records for all running services.
+  </Card>
+  <Card title="ACME / SSL" icon="lock">
+    Automatic TLS certificate provisioning via the ACME protocol. The `acme.rs` module handles ACME-TLS-ALPN-01 challenges and caches certificates per domain. Services get valid TLS with no manual setup.
+  </Card>
+  <Card title="mDNS" icon="wifi">
+    LAN discovery via mDNS (`mdns.rs`). The device advertises itself and its services on the local network so browsers can reach them at `<hostname>.local` addresses without static IP configuration.
+  </Card>
+  <Card title="Tor via Arti" icon="shield">
+    Tor hidden services for every service that requests one. StartOS uses the Rust-native Arti Tor client rather than the C Tor daemon, giving each service a stable `.onion` address accessible over the Tor network.
+  </Card>
+  <Card title="WireGuard" icon="key">
+    VPN tunnels (`tunnel.rs`) for secure remote access without port forwarding. Users add WireGuard peers to reach their server and its services from anywhere, with the same addresses used on the local network.
+  </Card>
+  <Card title="Virtual hosting" icon="server">
+    The `vhost.rs` module routes HTTPS traffic to the correct service container based on SNI. All services share a single external TLS terminator; the internal routing is handled transparently.
+  </Card>
+</CardGroup>
+
+## LAN access
+
+When a service is installed and running, it becomes accessible on the local network through mDNS. The device hostname resolves to the server's LAN IP, and each service's interface is reachable at a path or subdomain of that hostname. The `cert-local` module issues a self-signed CA and per-service certificates for LAN addresses so that browsers show a valid padlock without requiring a public domain.
+
+Services do not need to configure anything to get LAN access — if the service binds a port and exports a UI interface, StartOS automatically makes it reachable at `https://<server>.local:<port>` (or via virtual hosting at `https://<service>.<server>.local`).
+
+## Tor hidden services
+
+Every service that binds a port gets an `.onion` address on the Tor network. These addresses are stable — they are derived from an Ed25519 key pair stored on the device — so the address remains constant even if the server's IP address changes. StartOS uses [Arti](https://gitlab.torproject.org/tpo/core/arti), the Rust implementation of the Tor client, for all Tor functionality.
+
+Tor access requires no port forwarding, no public IP address, and no DNS records. It is the recommended access method for users who cannot or do not want to expose their server to the public internet.
+
+<Note>
+  Tor addresses are long and not human-memorable. StartOS displays them alongside QR codes in the service interface view to make them easier to share with mobile clients.
+</Note>
+
+## WireGuard VPN
+
+WireGuard provides remote access that behaves identically to LAN access. When a user adds a WireGuard peer, they receive a configuration file that routes their device's traffic through an encrypted tunnel to the StartOS server. From the client's perspective, the server appears to be on the local network — the same LAN hostnames, the same certificates, and the same service URLs all work over the VPN.
+
+WireGuard tunnels are managed through the `tunnelbox` daemon (a symlink of `startbox`) and the `tunnel` RPC namespace. Adding a tunnel requires the WireGuard configuration and an optional gateway type:
+
+```bash
+start-cli net tunnel add <name> <wireguard-config> [--type <gateway-type>] [--set-as-default-outbound]
+```
+
+<Tip>
+  WireGuard is the recommended access method for users who want reliable, low-latency remote access from trusted personal devices. Tor is better suited for privacy-sensitive access from untrusted networks.
+</Tip>
+
+## SSL and ACME certificate management
+
+StartOS issues TLS certificates for services through two paths:
+
+1. **Local CA** — For `.local` addresses and internal LXC networking, StartOS generates its own certificate authority and signs per-service certificates. The CA certificate can be installed on client devices to avoid browser warnings.
+2. **ACME** — For public domain names, StartOS uses the ACME protocol (Let's Encrypt or compatible CAs) with the TLS-ALPN-01 challenge type. The `acme.rs` module maintains a cache of certified key pairs per domain (`AcmeTlsAlpnCache`) and renews them automatically before expiry.
+
+The `ssl.rs` module decides which certificate to serve based on the SNI hostname. Certificates are managed entirely by the OS — service developers never handle key material directly. The SDK exposes `effects.getSslCertificate()` and `effects.getSslKey()` for services that need to present a certificate to their own clients (e.g. a Bitcoin node presenting a certificate to its RPC callers).
+
+## Port binding and service interfaces
+
+Services declare their network presence using the SDK's `MultiHost` and `ServiceInterfaceBuilder` APIs. At the Rust layer, each binding is tracked in the `Host` data structure, which holds:
+
+- **`bindings`** — The set of internal ports the service has bound, with their external addresses and protocol info
+- **`public_domains`** — Public domain names associated with this binding
+- **`private_domains`** — Private/LAN domain names associated with this binding
+- **`port_forwards`** — Computed port forwarding rules needed on gateways for public addresses
+
+The `HostnameInfo` type captures the full addressing information for a binding:
+
+```rust
+pub struct HostnameInfo {
+    pub ssl: bool,
+    pub public: bool,
+    pub hostname: InternedString,
+    pub port: Option<u16>,
+    pub metadata: HostnameMetadata,
+}
+```
+
+`HostnameMetadata` distinguishes between address types: IPv4, IPv6, mDNS, private domain, public domain, and plugin-supplied addresses.
+
+## MultiHost: one port, multiple interfaces
+
+A single bound port can serve multiple logical interfaces. The `MultiHost` SDK API lets service developers export a primary UI, an admin UI, and an API endpoint all on the same port, distinguished by path:
+
+```typescript
+const host = await sdk.MultiHost.of(effects, 'main', hostId)
+await host.bindPort(8080, { protocol: 'https' })
+
+await sdk.exportServiceInterface(effects, {
+  id: 'ui',
+  type: 'ui',
+  name: 'Web UI',
+  description: 'The main user interface',
+  host,
+  bindOptions: { scheme: 'https', preferredExternalPort: 443, path: '/' },
+})
+
+await sdk.exportServiceInterface(effects, {
+  id: 'api',
+  type: 'api',
+  name: 'REST API',
+  description: 'Programmatic access',
+  host,
+  bindOptions: { scheme: 'https', preferredExternalPort: 443, path: '/api' },
+})
+```
+
+Interface types are `'ui'`, `'api'`, or `'p2p'`. StartOS uses this type information to display interfaces appropriately in the admin UI and to help users understand how to connect external clients.
+
+## Network flow summary
+
+```text
+Client device
+    │
+    ├── LAN (.local / mDNS)   ──→  vhost (SNI) → service container
+    ├── Tor (.onion)           ──→  Arti hidden service → service container
+    └── WireGuard (VPN)        ──→  tunnelbox → LAN path → service container
+                                         │
+                                    All paths:
+                                    TLS terminated, certificate from
+                                    local CA or ACME as appropriate
+```
+
+Every path terminates at the same service container endpoint. Services do not need to be aware of which transport the client used.

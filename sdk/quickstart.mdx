@@ -1,0 +1,227 @@
+---
+title: "Build and pack your first StartOS service package"
+description: "Install the Start SDK, define a manifest, wire up the StartSdk facade, declare daemons, and pack everything into a signed .s9pk file ready for StartOS."
+---
+
+This guide walks you from an empty directory to a signed `.s9pk` package. You will install the SDK, write a minimal manifest, build the `StartSdk` facade, define a main function that starts your daemon, and pack the result with `start-cli`. Each step produces working TypeScript — not pseudocode — so you can follow along in a real project.
+
+<Note>
+  Before you start, make sure you have Node.js 18 or later and `start-cli` installed. For a full environment setup including Docker and the Rust toolchain, see the [packaging guide](https://docs.start9.com/packaging).
+</Note>
+
+<Steps>
+  <Step title="Install the SDK">
+    Add `@start9labs/start-sdk` to your project:
+
+    <Tabs>
+      <Tab title="npm">
+        ```bash
+        npm install @start9labs/start-sdk
+        ```
+      </Tab>
+      <Tab title="yarn">
+        ```bash
+        yarn add @start9labs/start-sdk
+        ```
+      </Tab>
+      <Tab title="pnpm">
+        ```bash
+        pnpm add @start9labs/start-sdk
+        ```
+      </Tab>
+    </Tabs>
+
+    The current SDK version is **1.3.3**. The package includes both `@start9labs/start-sdk` and its peer dependency `@start9labs/start-sdk-base`, which provides the core ABI types and effects interface.
+  </Step>
+
+  <Step title="Create a manifest">
+    The manifest declares your service's identity and all the resources it uses. Create `src/manifest.ts`:
+
+    ```typescript src/manifest.ts
+    import { setupManifest, buildManifest } from '@start9labs/start-sdk'
+
+    const manifest = setupManifest({
+      id: 'my-service',
+      title: 'My Service',
+      license: 'MIT',
+      description: {
+        short: 'A short description shown in the marketplace.',
+        long: 'A longer description with full details about what this service does.',
+      },
+      wrapperRepo: 'https://github.com/example/my-service-wrapper',
+      upstreamRepo: 'https://github.com/example/my-service',
+      supportSite: 'https://example.com/support',
+      marketingSite: 'https://example.com',
+      images: {
+        main: {
+          source: { dockerTag: 'my-service:1.0.0' },
+        },
+      },
+      volumes: { main: {} },
+      dependencies: {},
+      alerts: {},
+    })
+
+    export default buildManifest(manifest)
+    ```
+
+    `buildManifest()` finalizes the manifest with the current SDK version, OS version compatibility, and migration version ranges. The returned type carries all your manifest's field names — volume names, image IDs, and dependency IDs — as type-level information used throughout the SDK.
+
+    <Tip>
+      Keep the manifest in its own file. The `sdk` facade you build in the next step depends on it, and separating them avoids circular imports.
+    </Tip>
+  </Step>
+
+  <Step title="Build the StartSdk facade">
+    The `StartSdk` facade is your main entry point to the entire SDK surface area. Create `src/sdk.ts`:
+
+    ```typescript src/sdk.ts
+    import { StartSdk } from '@start9labs/start-sdk'
+    import manifest from './manifest'
+
+    export const sdk = StartSdk.of()
+      .withManifest(manifest)
+      .build(true)
+    ```
+
+    The `.build(true)` call locks the manifest type into every subsequent SDK method. From this point on, `sdk.Mounts.of().mountVolume()` only accepts volume names you declared in the manifest — a typo becomes a compile error.
+  </Step>
+
+  <Step title="Define main (daemons)">
+    The `main` export tells StartOS how to run your service. Create `src/main.ts`:
+
+    ```typescript src/main.ts
+    import { sdk } from './sdk'
+
+    export const main = sdk.setupMain(async ({ effects }) =>
+      sdk.Daemons.of(effects)
+        .addDaemon('primary', {
+          command: ['my-service', '--port', '8080'],
+          mounts: sdk.Mounts.of()
+            .mountVolume('main', '/data'),
+          ready: {
+            display: 'Waiting for service to start',
+            fn: () =>
+              sdk.healthCheck.checkPortListening(effects, 8080, {
+                successMessage: 'Service is listening on port 8080',
+                errorMessage: 'Service port 8080 is not open',
+              }),
+          },
+          requires: [],
+        })
+    )
+    ```
+
+    `addDaemon` accepts a `requires` array to declare startup ordering between daemons. Daemons with no requirements start immediately; dependents wait until their requirements report `ready`.
+  </Step>
+
+  <Step title="Wire up the remaining exports">
+    StartOS expects a specific set of named exports from your package's `index.ts`. At minimum you need `manifest`, `main`, `init`, `uninit`, `actions`, and `createBackup`. Create `src/index.ts`:
+
+    ```typescript src/index.ts
+    export { default as manifest } from './manifest'
+    export { main } from './main'
+
+    import { sdk } from './sdk'
+
+    export const init = sdk.setupInit(async () => {})
+    export const uninit = sdk.setupUninit(async () => {})
+    export const actions = sdk.Actions.of()
+
+    export const { createBackup, restoreBackup } = sdk.setupBackups(
+      async () => sdk.Backups.ofVolumes('main')
+    )
+    ```
+
+    As your service grows, you'll add action definitions, health checks, network interface exports, and dependency declarations here.
+  </Step>
+
+  <Step title="Pack to .s9pk">
+    Once your TypeScript compiles, use `start-cli` to build the signed package archive:
+
+    ```bash
+    start-cli s9pk pack <manifest-path> -o my-service.s9pk
+    ```
+
+    Replace `<manifest-path>` with the path to your compiled `manifest.json` output. The CLI reads your manifest to locate images and JavaScript, then assembles and signs the merkle archive.
+
+    <Tip>
+      You can source images from an existing Docker tag with `--docker-tag`, trigger a fresh build with `--docker-build`, or point at pre-built squashfs files. See `start-cli s9pk pack --help` for all options.
+    </Tip>
+  </Step>
+</Steps>
+
+## Expanding your service
+
+Once you have a working base, the SDK exposes a full toolkit for production-ready packages:
+
+<CardGroup cols={2}>
+  <Card title="Network interfaces" icon="network-wired">
+    Export UI, API, and P2P interfaces using `MultiHost` and `ServiceInterfaceBuilder`. Bind ports and publish hostnames to users.
+
+    ```typescript
+    export const setInterfaces = sdk.setupInterfaces(
+      async ({ effects }) => {
+        const multi = sdk.MultiHost.of(effects, 'web')
+        const origin = await multi.bindPort(80, {
+          protocol: 'http',
+        })
+        const ui = sdk.createInterface(effects, {
+          name: 'Web UI',
+          id: 'ui',
+          description: 'The primary web interface.',
+          type: 'ui',
+          username: null,
+          path: '/',
+          query: {},
+          schemeOverride: null,
+          masked: false,
+        })
+        return [await origin.export([ui])]
+      }
+    )
+    ```
+  </Card>
+  <Card title="User actions" icon="play">
+    Define interactive operations with validated form inputs:
+
+    ```typescript
+    export const setName = sdk.Action.withInput(
+      'set-name',
+      {
+        name: 'Set display name',
+        description: 'Update the service display name.',
+        visibility: 'enabled',
+      },
+      sdk.InputSpec.of({
+        name: sdk.Value.text({
+          name: 'Name',
+          required: true,
+          default: null,
+        }),
+      }),
+      async () => null,
+      async ({ effects, input }) => {
+        // handle input.name
+      },
+    )
+    ```
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Manifest reference" icon="file-code" href="/sdk/manifest">
+    Every manifest field explained, with a complete annotated example.
+  </Card>
+  <Card title="S9PK format" icon="archive" href="/sdk/s9pk-format">
+    How the archive is structured, signed, and streamed.
+  </Card>
+  <Card title="Versioning" icon="tag" href="/sdk/versioning">
+    ExVer format for independent upstream and downstream version tracking.
+  </Card>
+  <Card title="Full packaging guide" icon="book" href="https://docs.start9.com/packaging">
+    In-depth tutorials covering every SDK module on docs.start9.com.
+  </Card>
+</CardGroup>

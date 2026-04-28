@@ -1,0 +1,218 @@
+---
+title: "ExVer: extended versioning for StartOS packages"
+description: "ExVer format for independent upstream/downstream version tracking, flavor variants, range syntax, and the TypeScript API for parsing and checking versions."
+---
+
+ExVer (Extended Version) is the versioning format used across StartOS. It extends semantic versioning with two additions: a **downstream** component that tracks the StartOS wrapper version independently of the upstream software version, and an optional **flavor** prefix that identifies fork or variant packages. Both the Rust core and the TypeScript SDK parse the same string format and implement the same `satisfies` semantics.
+
+## Why ExVer exists
+
+Standard semver ties every version bump to the upstream project. When you maintain a StartOS wrapper for third-party software, two independent development streams evolve simultaneously: the upstream project releases new versions, and you release new wrapper revisions that fix packaging bugs, update configuration templates, or adapt to new StartOS APIs — without the upstream project changing at all.
+
+ExVer solves this by separating the two:
+
+| Component | Meaning | Who controls it |
+|-----------|---------|-----------------|
+| `upstream` | The upstream software version (`1.2.3`, `21.0`, `1.0.0-rc.1`) | Upstream project |
+| `downstream` | The StartOS wrapper revision (`0`, `1`, `2`, ...) | Package maintainer |
+| `flavor` | Optional fork/variant identifier (`bitcoin`, `signet`) | Package maintainer |
+
+When Bitcoin Core releases `27.0` you update `upstream`. When you fix a packaging bug in your wrapper you increment `downstream` without touching `upstream`. A dependency can then express `>=26.0.0:0` to mean "any wrapper of Bitcoin Core 26 or later".
+
+## String format
+
+```
+[#flavor:]upstream:downstream
+```
+
+<AccordionGroup>
+  <Accordion title="Examples">
+    | String | Meaning |
+    |--------|---------|
+    | `1.2.3:0` | Upstream 1.2.3, first downstream release |
+    | `1.2.3:2` | Upstream 1.2.3, third downstream release |
+    | `1.0.0-rc.1:0` | Upstream prerelease, first downstream release |
+    | `#bitcoin:21.0:1` | Bitcoin flavor, upstream 21.0, downstream 1 |
+    | `#signet:27.0.0:0` | Signet flavor, upstream 27.0.0, first downstream release |
+  </Accordion>
+</AccordionGroup>
+
+## TypeScript API
+
+The TypeScript implementation lives in `base/lib/exver/` and is re-exported from `@start9labs/start-sdk`.
+
+### Version
+
+A semver-style version with arbitrary digit segments and an optional prerelease tag:
+
+```typescript
+import { Version } from '@start9labs/start-sdk'
+
+// Construct directly
+const v = new Version([1, 2, 3], [])
+
+// Parse from string
+const v = Version.parse('1.2.3')
+const vPre = Version.parse('1.0.0-rc.1')
+
+// Compare
+v.compare(other)         // 'greater' | 'equal' | 'less'
+v.compareForSort(other)  // -1 | 0 | 1 (for Array.sort)
+
+// Properties
+v.number      // number[]
+v.prerelease  // (string | number)[]
+```
+
+### ExtendedVersion
+
+The primary version type. Pairs an upstream `Version` with a downstream `Version` and an optional flavor string:
+
+```typescript
+import { ExtendedVersion } from '@start9labs/start-sdk'
+
+// Parse from string
+const ev = ExtendedVersion.parse('1.2.3:0')
+const evFlavored = ExtendedVersion.parse('#bitcoin:27.0:1')
+
+// Properties
+ev.flavor      // string | null
+ev.upstream    // Version
+ev.downstream  // Version
+
+// Comparison (returns null for different flavors — not comparable)
+ev.compare(other)      // 'greater' | 'equal' | 'less' | null
+ev.equals(other)       // boolean
+ev.greaterThan(other)  // boolean
+ev.lessThan(other)     // boolean
+
+// Increment helpers (return new instances)
+ev.incrementMajor()
+ev.incrementMinor()
+```
+
+<Warning>
+  Versions with different flavors are **not comparable**. `ev.compare(other)` returns `null` when the two versions have different flavor strings. A `>=` range over a `#bitcoin` version never matches a `#signet` version, or an unflavored version.
+</Warning>
+
+### VersionRange
+
+A predicate over `ExtendedVersion`. Supports comparison operators, caret and tilde expansion, boolean logic, and flavor constraints:
+
+```typescript
+import { VersionRange, ExtendedVersion } from '@start9labs/start-sdk'
+
+// Parse range strings
+const r1 = VersionRange.parse('>=1.0.0:0')
+const r2 = VersionRange.parse('^1.2.3:0')
+const r3 = VersionRange.parse('>=1.0.0 <2.0.0')   // implicit AND
+const r4 = VersionRange.parse('#bitcoin')           // flavor match only
+const r5 = VersionRange.parse('*')                  // any version
+
+// Construct programmatically
+VersionRange.any()                         // matches everything
+VersionRange.none()                        // matches nothing
+VersionRange.anchor('=', ev)              // exact match
+VersionRange.anchor('>=', ev)             // greater-than-or-equal
+VersionRange.anchor('^', ev)              // compatible changes
+VersionRange.anchor('~', ev)              // patch-level changes
+VersionRange.flavor(null)                 // match unflavored versions only
+VersionRange.flavor('bitcoin')            // match #bitcoin versions only
+
+// Boolean combinators (static — smart, variadic)
+VersionRange.and(r1, r2, r3)
+VersionRange.or(r1, r2)
+
+// Boolean combinators (instance — just wrap)
+r1.and(r2)
+r1.or(r2)
+r1.not()
+```
+
+### Checking satisfaction
+
+```typescript
+const version = ExtendedVersion.parse('1.5.0:0')
+const range = VersionRange.parse('>=1.0.0:0 <2.0.0:0')
+
+// Both forms are equivalent
+version.satisfies(range)    // true
+range.satisfiedBy(version)  // true
+```
+
+When no operator is specified in a range string, `^` (caret) is the default — `1.2.3:0` in a range means `^1.2.3:0`.
+
+## Range syntax reference
+
+| Syntax | Meaning |
+|--------|---------|
+| `=1.2.3:0` | Exactly version `1.2.3:0` |
+| `!=1.2.3:0` | Any version except `1.2.3:0` |
+| `>1.2.3:0` | Strictly greater than `1.2.3:0` |
+| `>=1.2.3:0` | Greater than or equal to `1.2.3:0` |
+| `<2.0.0:0` | Strictly less than `2.0.0:0` |
+| `<=2.0.0:0` | Less than or equal to `2.0.0:0` |
+| `^1.2.3:0` | Compatible: `>=1.2.3:0 <2.0.0:0` (first non-zero digit unchanged) |
+| `~1.2.3:0` | Patch-level: `>=1.2.3:0 <1.3.0:0` (minor unchanged) |
+| `>=1.0.0 <2.0.0` | Implicit AND — space between constraints means AND |
+| `>=1.0.0 \|\| >=3.0.0` | Explicit OR |
+| `#bitcoin` | Match any `#bitcoin:*` version |
+| `*` | Match any version |
+
+## Flavor variants
+
+Flavors are used for fork or variant packages that have a different package ID but share the same core software. For example, a `#signet` Bitcoin package runs the Bitcoin signet network — different configuration, different data directory, different package ID — but based on the same upstream Bitcoin Core code.
+
+A dependency that specifies `version: '#bitcoin'` matches **only** `#bitcoin:*` versions, not unflavored or `#signet` versions. This prevents a signet node from satisfying a dependency that expects a mainnet node.
+
+```typescript
+const mainnet = ExtendedVersion.parse('#bitcoin:27.0:1')
+const signet = ExtendedVersion.parse('#signet:27.0:0')
+const unflavored = ExtendedVersion.parse('27.0:0')
+
+const bitcoinRange = VersionRange.parse('#bitcoin')
+bitcoinRange.satisfiedBy(mainnet)    // true
+bitcoinRange.satisfiedBy(signet)     // false
+bitcoinRange.satisfiedBy(unflavored) // false
+```
+
+## Using ExVer in manifests
+
+The `version`, `satisfies`, `canMigrateTo`, and `canMigrateFrom` manifest fields all use ExVer strings. Dependency version ranges use the range syntax:
+
+```typescript
+setupManifest({
+  id: 'my-app',
+  version: '2.1.0:0',
+  satisfies: ['>=2.0.0:0'],         // this release also satisfies the 2.x range
+  canMigrateTo: '>=2.1.0:0',        // can upgrade to any future 2.1.x+
+  canMigrateFrom: '>=2.0.0:0',      // can downgrade from any 2.0.x
+  dependencies: {
+    bitcoind: {
+      version: '>=26.0.0:0 <28.0.0:0',
+      // ...
+    },
+  },
+  // ...
+})
+```
+
+## Data version tracking
+
+The SDK also provides helpers for tracking which migration version your service's stored data has been brought to:
+
+```typescript
+import { sdk } from './sdk'
+import { ExtendedVersion } from '@start9labs/start-sdk'
+
+// In your init script, after running migrations:
+await sdk.setDataVersion(effects, ExtendedVersion.parse('2.1.0:0'))
+
+// To read the current data version (returns ExtendedVersion | VersionRange | null):
+const version = await sdk.getDataVersion(effects)
+if (version && 'lessThan' in version) {
+  console.log('Current data version:', version.toString())
+}
+```
+
+This is distinct from the package version in the manifest — it records the version at which your data schema currently sits, which may lag behind the installed package version if a migration is interrupted.

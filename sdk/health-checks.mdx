@@ -1,0 +1,189 @@
+---
+title: "Configuring health checks and polling triggers"
+description: "Configure periodic probes that report service health to StartOS using built-in TCP, HTTP, and script checks with customizable polling strategies."
+---
+
+Health checks are periodic probes that tell StartOS whether your service is running correctly. They appear in the service dashboard as a live status indicator — giving users immediate feedback when something goes wrong. Each health check runs on a schedule controlled by a trigger, transitions through a set of defined states, and reports its result through the `Effects` interface. Getting health checks right makes your service feel production-quality and lets StartOS surface problems before users notice them.
+
+## Health states
+
+A health check can be in one of four states at any time:
+
+| State | Meaning |
+|---|---|
+| `starting` | The check has not yet produced a result (grace period after daemon start) |
+| `running` | The last probe succeeded |
+| `waiting` | The check is pending — previous probe failed, retrying |
+| `failure` | The probe has consistently failed; service is unhealthy |
+
+These states flow directly to the StartOS UI. Users see `running` as a green indicator, `failure` as red, and `starting`/`waiting` as amber.
+
+## Built-in check functions
+
+The SDK ships three ready-made probe functions covering the most common cases:
+
+<Tabs>
+  <Tab title="checkPortListening">
+    Reads `/proc/net/tcp` and `/proc/net/udp` to check whether a port is bound and listening. Succeeds if any socket is bound to the given port. Does not open a connection.
+
+    ```typescript
+    sdk.healthCheck.checkPortListening(effects, 5432, {
+      successMessage: 'Database is listening',
+      errorMessage: 'Database port is not open',
+      timeout: 1000,  // optional, defaults to 1000ms
+    })
+    ```
+
+    Use this when your service exposes a TCP or UDP socket but does not have an HTTP interface — databases, message brokers, custom protocols.
+  </Tab>
+  <Tab title="checkWebUrl">
+    Performs an HTTP fetch to the given URL. Succeeds on any HTTP response (regardless of status code); fails if the request errors or times out.
+
+    ```typescript
+    sdk.healthCheck.checkWebUrl(
+      effects,
+      'http://localhost:3000/health',
+      {
+        successMessage: 'Web interface is reachable',
+        errorMessage: 'Web interface is not responding',
+        timeout: 1000,  // optional, defaults to 1000ms
+      },
+    )
+    ```
+
+    Prefer this for web services. It validates not just that the port is open, but that the HTTP stack is responding.
+  </Tab>
+  <Tab title="runHealthScript">
+    Executes a script and checks the exit code. Exit `0` means healthy; any other code means unhealthy. Use this for custom checks that cannot be expressed as a port or URL probe.
+
+    ```typescript
+    sdk.healthCheck.runHealthScript(effects, {
+      command: ['/scripts/check-sync.sh'],
+    })
+    ```
+  </Tab>
+</Tabs>
+
+## Registering a health check
+
+Health checks are registered on the `Daemons` builder via `.addHealthCheck()`. Each check has a unique key, a display name, a probe function, and a trigger:
+
+```typescript
+sdk.Daemons.of(effects)
+  .addDaemon('app', { /* ... */ })
+  .addHealthCheck('primary', {
+    name: 'Web interface',
+    fn: () => sdk.healthCheck.checkWebUrl(
+      effects,
+      'http://localhost:3000/health',
+      { successMessage: 'Interface is up', errorMessage: 'Interface is unreachable' },
+    ),
+    trigger: sdk.trigger.defaultTrigger,
+  })
+```
+
+You can register multiple health checks to monitor different aspects of your service independently:
+
+```typescript
+  .addHealthCheck('database', {
+    name: 'Database',
+    fn: () => sdk.healthCheck.checkPortListening(effects, 5432, {
+      successMessage: 'Database is listening',
+      errorMessage: 'Database port is not open',
+    }),
+    trigger: sdk.trigger.cooldownTrigger(15_000),
+  })
+  .addHealthCheck('sync', {
+    name: 'Sync status',
+    fn: () => sdk.healthCheck.runHealthScript(effects, {
+      command: ['/scripts/check-sync.sh'],
+    }),
+    trigger: sdk.trigger.statusTrigger(30_000, { starting: 5_000, failure: 5_000 }),
+  })
+```
+
+## Polling triggers
+
+A trigger is a function that determines how long to wait between each probe. The SDK provides three built-in strategies:
+
+<AccordionGroup>
+  <Accordion title="defaultTrigger">
+    The recommended default. Polls every **1 second** while the check is in `starting`, `waiting`, or `failure` state, and every **30 seconds** while `running`. This gives fast feedback during startup and failure recovery without hammering a healthy service.
+
+    ```typescript
+    trigger: sdk.trigger.defaultTrigger
+    ```
+  </Accordion>
+  <Accordion title="cooldownTrigger(interval)">
+    Fixed interval between checks, regardless of health state. Use when you want consistent polling frequency — for example, a sync-progress check that should run at a steady cadence.
+
+    ```typescript
+    trigger: sdk.trigger.cooldownTrigger(30_000)   // every 30 seconds
+    ```
+  </Accordion>
+  <Accordion title="statusTrigger(default, overrides)">
+    Per-state polling intervals with a default fallback. Define different intervals for specific states and fall back to `default` for any state not listed.
+
+    ```typescript
+    trigger: sdk.trigger.statusTrigger(30_000, {
+      starting: 5_000,   // poll every 5s while starting
+      failure: 5_000,    // poll every 5s while failing
+    })
+    ```
+
+    This gives you the efficiency of infrequent polling during steady-state operation with the responsiveness of frequent polling during startup or recovery.
+  </Accordion>
+</AccordionGroup>
+
+## Reporting health from effects
+
+In addition to the daemon-registered probes, any code running inside the service can report health directly using `effects.setHealth()`. The `SetHealth` type accepts the same states as the built-in checks:
+
+```typescript
+await effects.setHealth({
+  id: 'sync',
+  name: 'Sync status',
+  status: 'running',
+  message: 'Synced to block 850000',
+})
+```
+
+Use `setHealth` for health state that your service computes internally and cannot be determined from the outside through a port or URL probe.
+
+<Note>
+IDs passed to `effects.setHealth()` must match the key used in `.addHealthCheck()`. StartOS uses the key to correlate runtime reports with the registered check metadata.
+</Note>
+
+## Health checks and daemon ready probes
+
+Health checks registered with `.addHealthCheck()` are distinct from the `ready` probe on each daemon. The ready probe is polled once during startup to gate when dependent daemons start — it is not reported to the user. The health check runs continuously and is the status visible in the UI.
+
+```typescript
+.addDaemon('db', {
+  command: ['postgres', '-D', '/data/pgdata'],
+  // ready probe — used for startup ordering only
+  ready: {
+    display: 'Database',
+    fn: () => sdk.healthCheck.checkPortListening(effects, 5432, {
+      successMessage: 'Database ready',
+      errorMessage: 'Database not ready',
+    }),
+  },
+  mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+})
+// health check — continuous, visible to users
+.addHealthCheck('database', {
+  name: 'Database',
+  fn: () => sdk.healthCheck.checkPortListening(effects, 5432, {
+    successMessage: 'Database is running',
+    errorMessage: 'Database is not responding',
+  }),
+  trigger: sdk.trigger.defaultTrigger,
+})
+```
+
+You can reuse the same probe function for both, but they serve different purposes and run on independent schedules.
+
+<Tip>
+Register a health check for each user-visible capability of your service — web UI, API endpoint, sync progress — not just one global check. This gives users and the StartOS runtime precise information about which part of the service is having trouble.
+</Tip>

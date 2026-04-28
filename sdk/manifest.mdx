@@ -1,0 +1,295 @@
+---
+title: "Manifest: declaring service metadata and resources"
+description: "All manifest.json fields, image configuration, and the setupManifest() and buildManifest() TypeScript API for defining type-safe StartOS service packages."
+---
+
+The manifest is the authoritative description of your service package. StartOS reads `manifest.json` from the `.s9pk` archive to know your service's identity, which container images to run, which volumes to mount, what other packages it depends on, and how to display it in the marketplace. The SDK's `setupManifest()` function gives you a fully type-safe way to construct this object in TypeScript — the resulting type then flows as a constraint through every subsequent SDK call.
+
+## TypeScript API
+
+Define your manifest in a dedicated `manifest.ts` file and export the built result as the module default:
+
+```typescript src/manifest.ts
+import { setupManifest, buildManifest } from '@start9labs/start-sdk'
+
+const manifest = setupManifest({
+  id: 'bitcoind',
+  title: 'Bitcoin Core',
+  version: '27.0.0:0',
+  license: 'MIT',
+  description: {
+    short: 'A full Bitcoin node.',
+    long: 'Bitcoin Core is the reference implementation of the Bitcoin protocol. Running your own node gives you full sovereignty over your Bitcoin transactions and blockchain data.',
+  },
+  wrapperRepo: 'https://github.com/Start9Labs/bitcoind-startos',
+  upstreamRepo: 'https://github.com/bitcoin/bitcoin',
+  supportSite: 'https://bitcoin.org/en/support',
+  marketingSite: 'https://bitcoin.org',
+  donationUrl: 'https://bitcoincore.org/en/donate/',
+  docsUrl: 'https://bitcoin.org/en/full-node',
+  releaseNotes: 'Upgrade to Bitcoin Core 27.0.',
+  images: {
+    main: {
+      source: { dockerTag: 'start9/bitcoind:27.0.0' },
+      arch: ['x86_64', 'aarch64'],
+      emulateMissingAs: 'aarch64',
+    },
+  },
+  volumes: {
+    main: {},
+    backups: {},
+  },
+  alerts: {
+    install: null,
+    uninstall: 'Uninstalling removes all blockchain data.',
+    restore: null,
+    start: null,
+    stop: null,
+  },
+  dependencies: {},
+  hardwareRequirements: {
+    minimumRam: null,
+    device: {},
+  },
+  hardwareAcceleration: false,
+})
+
+export default buildManifest(manifest)
+```
+
+`buildManifest()` finalizes the manifest by injecting the current SDK version, OS version compatibility bounds, and migration version ranges derived from `satisfies`, `canMigrateTo`, and `canMigrateFrom`. It returns a value whose TypeScript type encodes your volume names, image IDs, and dependency IDs as literal string unions — these become type constraints throughout the SDK.
+
+<Note>
+  The `version` field uses ExVer format (`upstream:downstream`). See the [versioning reference](/sdk/versioning) for the full syntax including flavor variants.
+</Note>
+
+## Field reference
+
+### Identity and display
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Package identifier. Lowercase letters, digits, and hyphens. Must be unique in the marketplace (e.g. `bitcoind`). |
+| `title` | string | Yes | Human-readable display name shown in the UI. |
+| `version` | string | Yes | ExVer string: `upstream:downstream` or `#flavor:upstream:downstream`. |
+| `license` | string | Yes | SPDX license identifier (e.g. `MIT`, `GPL-3.0`). |
+| `description` | object | Yes | Short (one-line) and long (full) descriptions. Both fields support localization via a `{ en_US: "..." }` object. |
+| `releaseNotes` | string \| object | Yes | What changed in this version. Supports localization. |
+| `wrapperRepo` | string | Yes | URL of the StartOS wrapper repository. |
+| `upstreamRepo` | string | Yes | URL of the upstream project repository. |
+| `supportSite` | string | Yes | URL for user support. |
+| `marketingSite` | string | Yes | URL for the service's public website. |
+| `donationUrl` | string? | No | Optional URL shown as a donation link in the UI. |
+| `docsUrl` | string? | No | Optional URL linking to upstream documentation. |
+
+### Versioning and migration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `satisfies` | string[] | Additional version ranges this release satisfies. Used when a dependency specifies a range that an older version format would have covered. |
+| `canMigrateTo` | string | ExVer range of future versions that can be reached by forward migration from this version. |
+| `canMigrateFrom` | string | ExVer range of past versions from which backward migration to this version is supported. |
+
+### Images
+
+Each key under `images` is an image ID that you will reference throughout the SDK (in `Mounts.of().mountVolume()`, `SubContainer.of()`, etc.).
+
+```typescript
+images: {
+  main: {
+    source: { dockerTag: 'my-image:1.0.0' },
+    arch: ['x86_64', 'aarch64'],
+    emulateMissingAs: 'aarch64',
+    nvidiaContainer: false,
+  },
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source.dockerTag` | string | Pull the image from a Docker registry tag. |
+| `arch` | string[] | Architectures this image supports. Values: `x86_64`, `aarch64`, `riscv64`. |
+| `emulateMissingAs` | string? | When running on an unsupported architecture, emulate using this architecture's image. |
+| `nvidiaContainer` | boolean | Enable NVIDIA container runtime support for GPU workloads. |
+
+### Volumes
+
+Volumes provide persistent storage across service restarts and updates. Declare each volume you need:
+
+```typescript
+volumes: {
+  main: {},      // primary data volume
+  cache: {},     // separate cache volume
+}
+```
+
+Volume IDs must be lowercase alphanumeric strings. The SDK's type system uses these IDs as constraints — `sdk.Mounts.of().mountVolume('main', '/data')` only compiles if `main` is declared here.
+
+### Dependencies
+
+Declare other StartOS packages your service requires:
+
+```typescript
+dependencies: {
+  bitcoind: {
+    version: '>=26.0.0:0',
+    description: 'Required for blockchain access.',
+    requirement: {
+      type: 'required',
+      check: {
+        type: 'running',
+        healthChecks: ['synced'],
+      },
+    },
+    config: null,
+  },
+}
+```
+
+### Hardware requirements
+
+```typescript
+hardwareRequirements: {
+  minimumRam: 4294967296,   // bytes (4 GB)
+  device: {
+    'device-id': {
+      pattern: 'usb.*ledger',
+      patternDescription: 'Ledger hardware wallet',
+      count: 1,
+    },
+  },
+},
+hardwareAcceleration: false,
+```
+
+### Alerts
+
+Display messages to users at specific lifecycle events. Set a field to `null` to suppress the default message, or provide a string to show a custom alert:
+
+```typescript
+alerts: {
+  install: 'Initial blockchain sync takes several days.',
+  uninstall: 'All blockchain data will be permanently deleted.',
+  restore: null,
+  start: null,
+  stop: null,
+}
+```
+
+### Runtime metadata
+
+These fields are set automatically by `buildManifest()` and do not need to be provided manually:
+
+| Field | Description |
+|-------|-------------|
+| `osVersion` | Minimum StartOS version required. Derived from the SDK version. |
+| `sdkVersion` | The `@start9labs/start-sdk` version used to build. |
+| `gitHash` | Optional git commit hash, injected by `start-cli` during packing. |
+
+## Complete annotated example
+
+<CodeGroup>
+
+```typescript manifest.ts
+import { setupManifest, buildManifest } from '@start9labs/start-sdk'
+
+const manifest = setupManifest({
+  // --- Identity ---
+  id: 'my-service',
+  title: 'My Service',
+  version: '2.1.0:0',
+  license: 'Apache-2.0',
+
+  // --- Descriptions ---
+  description: {
+    short: 'One-line description for the marketplace listing.',
+    long: 'Full description shown on the service detail page. Explain what the service does, why it is useful on StartOS, and any important caveats.',
+  },
+  releaseNotes: 'Upgraded to v2.1.0 with improved performance.',
+
+  // --- Links ---
+  wrapperRepo: 'https://github.com/example/my-service-wrapper',
+  upstreamRepo: 'https://github.com/example/my-service',
+  supportSite: 'https://example.com/support',
+  marketingSite: 'https://example.com',
+  donationUrl: 'https://example.com/donate',
+  docsUrl: 'https://docs.example.com',
+
+  // --- Container images ---
+  images: {
+    main: {
+      source: { dockerTag: 'example/my-service:2.1.0' },
+      arch: ['x86_64', 'aarch64'],
+      emulateMissingAs: 'aarch64',
+      nvidiaContainer: false,
+    },
+  },
+
+  // --- Persistent volumes ---
+  volumes: {
+    main: {},
+  },
+
+  // --- User alerts ---
+  alerts: {
+    install: null,
+    uninstall: 'All service data will be permanently deleted.',
+    restore: null,
+    start: null,
+    stop: null,
+  },
+
+  // --- Inter-service dependencies ---
+  dependencies: {},
+
+  // --- Hardware ---
+  hardwareRequirements: {
+    minimumRam: null,
+    device: {},
+  },
+  hardwareAcceleration: false,
+})
+
+export default buildManifest(manifest)
+```
+
+```json manifest.json (compiled output)
+{
+  "id": "my-service",
+  "title": "My Service",
+  "version": "2.1.0:0",
+  "license": "Apache-2.0",
+  "description": {
+    "short": "One-line description for the marketplace listing.",
+    "long": "Full description shown on the service detail page."
+  },
+  "releaseNotes": "Upgraded to v2.1.0 with improved performance.",
+  "wrapperRepo": "https://github.com/example/my-service-wrapper",
+  "upstreamRepo": "https://github.com/example/my-service",
+  "supportSite": "https://example.com/support",
+  "marketingSite": "https://example.com",
+  "images": {
+    "main": {
+      "source": { "dockerTag": "example/my-service:2.1.0" },
+      "arch": ["x86_64", "aarch64"],
+      "emulateMissingAs": "aarch64",
+      "nvidiaContainer": false
+    }
+  },
+  "volumes": ["main"],
+  "alerts": {
+    "install": null,
+    "uninstall": "All service data will be permanently deleted.",
+    "restore": null,
+    "start": null,
+    "stop": null
+  },
+  "dependencies": {},
+  "hardwareRequirements": { "minimumRam": null, "device": {} },
+  "hardwareAcceleration": false,
+  "osVersion": ">=0.3.6",
+  "sdkVersion": "1.3.3"
+}
+```
+
+</CodeGroup>

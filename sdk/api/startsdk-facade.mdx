@@ -1,0 +1,765 @@
+---
+title: "StartSdk facade: primary SDK entry point"
+description: "StartSdk facade reference: construction, manifest threading, and helper categories from daemons and health checks to backups, interfaces, and plugins."
+---
+
+`StartSdk` is the primary entry point for service developers. It is constructed via a three-step builder chain that binds a typed manifest to the SDK, then produces an object containing every helper you need to implement the StartOS ABI. The manifest type flows through all subsequent API calls via TypeScript generics, turning typos in volume names, image IDs, dependency IDs, and plugin identifiers into compile errors rather than runtime failures.
+
+## Construction
+
+```typescript
+import { StartSdk } from '@start9labs/start-sdk'
+import { manifest } from './manifest'
+
+export const sdk = StartSdk.of()
+  .withManifest(manifest)
+  .build(true)
+```
+
+<Steps>
+  <Step title="StartSdk.of()">
+    Creates an uninitialized `StartSdk` instance with the manifest type parameter set to `never`.
+  </Step>
+  <Step title=".withManifest(manifest)">
+    Binds the manifest, producing a new `StartSdk<Manifest>` instance parameterized by the manifest's concrete type. From this point on, all generic constraints are derived from the manifest.
+  </Step>
+  <Step title=".build(true)">
+    Finalizes the SDK and returns the full toolkit object. The `true` argument is a type-level gate: it only resolves to `true` (not `'Build not ready'`) when a manifest has been bound via `.withManifest()`. TypeScript enforces this at compile time.
+  </Step>
+</Steps>
+
+## Type-safe manifest threading
+
+When you call `.withManifest(manifest)`, the manifest's type is captured as a generic type parameter `Manifest extends SDKManifest`. That type then constrains every subsequent API call:
+
+- `sdk.Mounts.of().mountVolume(name, path)` — `name` is typed as `keyof Manifest['volumes']`
+- `sdk.SubContainer.of(effects, { imageId }, ...)` — `imageId` is typed as `keyof Manifest['images']`
+- `sdk.checkDependencies(effects, packageIds?)` — `packageIds` elements are typed as `keyof Manifest['dependencies']`
+- `sdk.plugin.url` — only non-null when `'url-v0'` appears in `Manifest['plugins']`
+
+This propagation is automatic. You do not need to repeat the manifest type at each call site.
+
+---
+
+## SDK surface area
+
+### Manifest
+
+| Member | Type | Purpose |
+|--------|------|---------|
+| `sdk.manifest` | `Manifest` | The bound service manifest object |
+| `sdk.volumes` | `Record<keyof Manifest['volumes'], VolumePaths>` | Volume path helpers derived from manifest volume definitions |
+
+---
+
+### Actions
+
+Actions are user-invocable operations that appear in the StartOS UI. By convention, each action lives in its own file under an `actions/` directory.
+
+<AccordionGroup>
+  <Accordion title="sdk.Action.withInput">
+    Create an action that presents a validated form to the user before executing.
+
+    ```typescript
+    sdk.Action.withInput(
+      id: Id,
+      metadata: MaybeFn<Omit<ActionMetadata, 'hasInput'>>,
+      inputSpec: MaybeFn<InputSpecType, { effects: Effects; prefill: unknown | null }>,
+      getInput: (options: { effects: Effects; prefill: DeepPartial<Input> | null }) => Promise<...>,
+      run: (options: { effects: Effects; input: Input; spec: InputSpec }) => Promise<ActionResult | null>
+    ): Action<Id, Input>
+    ```
+
+    Both `metadata` and `inputSpec` may be plain values or async functions receiving `{ effects }`, enabling reactive metadata (e.g. showing different descriptions based on current state).
+  </Accordion>
+
+  <Accordion title="sdk.Action.withoutInput">
+    Create an action that executes immediately with no user input.
+
+    ```typescript
+    sdk.Action.withoutInput(
+      id: Id,
+      metadata: MaybeFn<Omit<ActionMetadata, 'hasInput'>>,
+      run: (options: { effects: Effects; input: {}; spec: InputSpec }) => Promise<ActionResult | null>
+    ): Action<Id, {}>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Actions">
+    Build a typed action map by chaining `.addAction()` calls. Pass the result as the `actions` export from your package.
+
+    ```typescript
+    export const actions = sdk.Actions.of()
+      .addAction(configAction)
+      .addAction(showSecretAction)
+    ```
+
+    `Actions.of()` returns an `Actions<{}>` instance. Each `.addAction(action)` call widens the type to include the new action's ID and input type.
+  </Accordion>
+
+  <Accordion title="sdk.action.run">
+    Programmatically invoke an action by ID, optionally on another package.
+
+    ```typescript
+    sdk.action.run(
+      effects: Effects,
+      packageId: PackageId,
+      actionId: ActionId,
+      input?: Record<string, unknown>
+    ): Promise<ActionResult | null>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.action.createTask">
+    Create a task notification in the StartOS task center prompting the user to run a specific action on any package.
+
+    ```typescript
+    sdk.action.createTask(
+      effects: Effects,
+      packageId: PackageId,
+      action: ActionInfo<ActionId, any>,
+      severity: TaskSeverity,
+      options?: TaskOptions<T>
+    ): Promise<null>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.action.createOwnTask">
+    Same as `createTask`, but uses `manifest.id` as the package ID automatically — no need to pass it explicitly.
+
+    ```typescript
+    sdk.action.createOwnTask(
+      effects: Effects,
+      action: ActionInfo<ActionId, any>,
+      severity: TaskSeverity,
+      options?: TaskOptions<T>
+    ): Promise<null>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.action.clearTask">
+    Clear one or more task notifications by their replay IDs.
+
+    ```typescript
+    sdk.action.clearTask(
+      effects: Effects,
+      ...replayIds: string[]
+    ): Promise<null>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Daemons
+
+Daemon management controls long-running processes — their startup order, readiness probes, and graceful shutdown. `setupMain` is the `main` export for your package.
+
+<AccordionGroup>
+  <Accordion title="sdk.setupMain">
+    Define the service's main entrypoint. The provided function receives `{ effects }` and must return a `Daemons` instance.
+
+    ```typescript
+    sdk.setupMain(
+      fn: (o: { effects: Effects }) => Promise<Daemons<Manifest, any>>
+    ): ExpectedExports.main
+    ```
+
+    ```typescript
+    export const main = sdk.setupMain(async ({ effects }) =>
+      sdk.Daemons.of(effects)
+        .addDaemon('primary', {
+          command: ['my-service', '--port', '8080'],
+          mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+          ready: {
+            fn: () => sdk.healthCheck.checkPortListening(effects, 8080),
+            trigger: sdk.trigger.defaultTrigger,
+          },
+          requires: [],
+        })
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Daemons.of">
+    Create a new `Daemons` builder. Chain `.addDaemon()` and `.addHealthCheck()` calls to define the service topology.
+
+    ```typescript
+    sdk.Daemons.of(effects: Effects): Daemons<Manifest, never>
+    ```
+
+    The `requires` field on each daemon entry references other daemon IDs by their string name, and the builder accumulates the set of defined IDs in the type parameter to enforce that `requires` only references daemons that have been added.
+  </Accordion>
+
+  <Accordion title="sdk.Daemon.of">
+    Create a single daemon definition. Use when you want to define a daemon outside of the `Daemons.of()` chain, for example in a separate file.
+
+    ```typescript
+    sdk.Daemon.of<Manifest>()
+    ```
+
+    Returns a curried function: call with `(effects, subcontainer, exec)`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Health checks
+
+Three built-in readiness probe functions for the most common patterns. Pair with a trigger strategy via the `trigger` field on a `Ready` config.
+
+<AccordionGroup>
+  <Accordion title="sdk.healthCheck.checkPortListening">
+    Check whether a TCP port is bound and listening by reading `/proc/net`.
+
+    ```typescript
+    sdk.healthCheck.checkPortListening(
+      effects: Effects,
+      port: number
+    ): Promise<HealthCheckResult>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.healthCheck.checkWebUrl">
+    Perform an HTTP(S) fetch and succeed if the response status is in the 2xx range.
+
+    ```typescript
+    sdk.healthCheck.checkWebUrl(
+      effects: Effects,
+      url: string,
+      options?: { timeout?: number }
+    ): Promise<HealthCheckResult>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.healthCheck.runHealthScript">
+    Run a command in a subcontainer and succeed on exit code 0.
+
+    ```typescript
+    sdk.healthCheck.runHealthScript(
+      effects: Effects,
+      command: CommandType
+    ): Promise<HealthCheckResult>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Interfaces
+
+Network endpoint management — bind ports and export UI, API, or P2P interfaces to users.
+
+<AccordionGroup>
+  <Accordion title="sdk.setupInterfaces">
+    Define how the service is hosted and served. Runs on install, update, and whenever the user saves configuration. Returns the `setupInterfaces` export.
+
+    ```typescript
+    sdk.setupInterfaces(
+      fn: (o: { effects: Effects }) => Promise<InterfaceReceipt[]>
+    ): SetupInterfaces
+    ```
+
+    ```typescript
+    export const setInterfaces = sdk.setupInterfaces(async ({ effects }) => {
+      const multi = sdk.MultiHost.of(effects, 'web')
+      const origin = await multi.bindPort(80, { protocol: 'http' })
+      const ui = sdk.createInterface(effects, {
+        name: 'Web UI',
+        id: 'ui',
+        description: 'The primary web interface.',
+        type: 'ui',
+        masked: false,
+        schemeOverride: null,
+        username: null,
+        path: '',
+        query: {},
+      })
+      return [await origin.export([ui])]
+    })
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.MultiHost.of">
+    Create a `MultiHost` instance that can bind a port and export multiple interfaces at different paths from that single port.
+
+    ```typescript
+    sdk.MultiHost.of(effects: Effects, id: string): MultiHost
+    ```
+
+    Call `multi.bindPort(internalPort, { protocol })` to get an origin, then `origin.export([...interfaces])` to publish interfaces and receive a receipt.
+  </Accordion>
+
+  <Accordion title="sdk.createInterface">
+    Build a `ServiceInterface` descriptor. Pass the result to `origin.export()`.
+
+    ```typescript
+    sdk.createInterface(
+      effects: Effects,
+      options: {
+        name: string
+        id: string
+        description: string
+        type: 'ui' | 'api' | 'p2p'
+        username: string | null
+        path: string
+        query: Record<string, string>
+        schemeOverride: { ssl: Scheme; noSsl: Scheme } | null
+        masked: boolean
+      }
+    ): ServiceInterfaceBuilder
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.serviceInterface.*">
+    Helpers for reading exported interfaces at runtime.
+
+    ```typescript
+    sdk.serviceInterface.getOwn(effects, interfaceId)   // own service, by ID
+    sdk.serviceInterface.get(effects, packageId, interfaceId)  // any package, by ID
+    sdk.serviceInterface.getAllOwn(effects)              // all own interfaces
+    sdk.serviceInterface.getAll(effects, packageId?)    // all interfaces for a package
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Backups
+
+Rsync-based volume backup configuration.
+
+<AccordionGroup>
+  <Accordion title="sdk.setupBackups">
+    Define how the service's data is backed up and restored. Returns `{ createBackup, restoreBackup }` — both required ABI exports.
+
+    ```typescript
+    sdk.setupBackups(
+      options: SetupBackupsParams<Manifest>
+    ): { createBackup: ExpectedExports.createBackup; restoreBackup: ... }
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Backups.ofVolumes">
+    Back up entire named volumes. Volume names are constrained to `keyof Manifest['volumes']`.
+
+    ```typescript
+    sdk.Backups.ofVolumes(...volumeNames: (keyof Manifest['volumes'])[]): Backups<Manifest>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Backups.ofSyncs">
+    Back up custom source/destination path pairs using rsync.
+
+    ```typescript
+    sdk.Backups.ofSyncs(
+      syncs: Array<{ dataPath: string; backupPath: string }>
+    ): Backups<Manifest>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Backups.withOptions">
+    Back up with explicit rsync options such as exclude patterns.
+
+    ```typescript
+    sdk.Backups.withOptions(options: Partial<SyncOptions>): Backups<Manifest>
+    ```
+
+    `SyncOptions` has `delete: boolean` and `exclude: string[]`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Dependencies
+
+<AccordionGroup>
+  <Accordion title="sdk.setupDependencies">
+    Declare the services that this package depends on, including version ranges and required health checks. Returns a `SetDependencies` init script.
+
+    ```typescript
+    sdk.setupDependencies(
+      fn: (o: { effects: Effects }) => Promise<DependencyMap<Manifest>>
+    ): SetDependencies
+    ```
+
+    ```typescript
+    export const setDependencies = sdk.setupDependencies(
+      async ({ effects }) => ({
+        'bitcoind': {
+          kind: 'running',
+          versionRange: '>=26.0.0',
+          healthChecks: ['synced'],
+        },
+      }),
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.checkDependencies">
+    Test whether the current dependency requirements are satisfied. `packageIds` is typed as a union of the dependency IDs declared in the manifest.
+
+    ```typescript
+    sdk.checkDependencies(
+      effects: Effects,
+      packageIds?: (keyof Manifest['dependencies'] & PackageId)[]
+    ): Promise<CheckDependencies<DependencyId>>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Init and uninit
+
+Lifecycle hooks that run on install, update, restore, boot, shutdown, and uninstall.
+
+<AccordionGroup>
+  <Accordion title="sdk.setupInit">
+    Compose multiple init scripts into a single `init` export. Scripts run in the order supplied.
+
+    ```typescript
+    sdk.setupInit(...scripts: InitScript[]): ExpectedExports.init
+    ```
+
+    ```typescript
+    export const init = sdk.setupInit(
+      versions,
+      setDependencies,
+      setInterfaces,
+      actions,
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.setupUninit">
+    Compose multiple uninit scripts into a single `uninit` export.
+
+    ```typescript
+    sdk.setupUninit(...scripts: UninitScript[]): ExpectedExports.uninit
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.setupOnInit">
+    Create an init script from an inline function. The `kind` parameter is `'install' | 'update' | 'restore' | null`.
+
+    ```typescript
+    sdk.setupOnInit(
+      fn: (o: {
+        effects: Effects
+        kind: 'install' | 'update' | 'restore' | null
+      }) => Promise<void>
+    ): InitScript
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.setupOnUninit">
+    Create an uninit script from an inline function. The `target` parameter indicates the version being transitioned to, or `null` on uninstall.
+
+    ```typescript
+    sdk.setupOnUninit(
+      fn: (o: {
+        effects: Effects
+        target: ExtendedVersion | VersionRange | null
+      }) => Promise<void>
+    ): UninitScript
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Containers
+
+Run commands in isolated container environments.
+
+<AccordionGroup>
+  <Accordion title="sdk.SubContainer.of">
+    Create a long-lived subcontainer backed by a manifest image. Returns a reference-counted handle.
+
+    ```typescript
+    sdk.SubContainer.of(
+      effects: Effects,
+      image: { imageId: keyof Manifest['images'] & ImageId; sharedRun?: boolean },
+      mounts: Mounts<Manifest> | null,
+      name: string
+    ): Promise<SubContainer<Manifest>>
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.SubContainer.withTemp">
+    Create an ephemeral subcontainer, run a function inside it, then destroy it automatically.
+
+    ```typescript
+    sdk.SubContainer.withTemp<T>(
+      effects: Effects,
+      image: { imageId: keyof Manifest['images'] & ImageId; sharedRun?: boolean },
+      mounts: Mounts<Manifest> | null,
+      name: string,
+      fn: (subContainer: SubContainer<Manifest>) => Promise<T>
+    ): Promise<T>
+    ```
+
+    ```typescript
+    await sdk.SubContainer.withTemp(
+      effects,
+      { imageId: 'main' },
+      mounts,
+      'migrate',
+      async (c) => c.exec(['run-migrations'])
+    )
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Mounts.of">
+    Create a `Mounts` builder for declaring what to attach to a container.
+
+    ```typescript
+    sdk.Mounts.of(): Mounts<Manifest>
+    ```
+
+    Chain the following methods:
+
+    ```typescript
+    sdk.Mounts.of()
+      .mountVolume('main', '/data')
+      .mountAssets('scripts', '/scripts')
+      .mountDependency('bitcoind', 'main', '/bitcoin-data', { readonly: true })
+      .mountBackup('/backup')
+    ```
+
+    Volume and asset names are constrained to keys declared in the manifest.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Forms
+
+Builder-pattern system for declaring validated form inputs shown to users in the StartOS UI.
+
+<AccordionGroup>
+  <Accordion title="sdk.InputSpec.of">
+    Define a form by mapping field names to `Value` instances.
+
+    ```typescript
+    sdk.InputSpec.of(spec: Record<string, Value<any>>): InputSpec<...>
+    ```
+
+    ```typescript
+    const { InputSpec, Value } = sdk
+
+    export const inputSpec = InputSpec.of({
+      host: Value.text({ name: 'Host', required: true, default: 'localhost' }),
+      port: Value.number({ name: 'Port', required: true, default: 8332 }),
+      rpcAuth: Value.toggle({ name: 'RPC Auth', default: false }),
+    })
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.Value">
+    Factory for individual form fields. Supported types:
+
+    | Method | Field type |
+    |--------|-----------|
+    | `Value.text(opts)` | Single-line text input |
+    | `Value.textarea(opts)` | Multi-line text input |
+    | `Value.number(opts)` | Numeric input |
+    | `Value.toggle(opts)` | Boolean switch |
+    | `Value.select(opts)` | Single-choice dropdown |
+    | `Value.multiselect(opts)` | Multi-choice dropdown |
+    | `Value.list(opts)` | Repeatable array of values |
+    | `Value.color(opts)` | Color picker |
+    | `Value.datetime(opts)` | Date/time picker |
+    | `Value.object(opts)` | Nested sub-form |
+    | `Value.union(opts)` | Conditional fields on a discriminator |
+    | `Value.dynamicUnion(opts)` | Async-loaded conditional fields |
+  </Accordion>
+
+  <Accordion title="sdk.Variants">
+    Build the discriminated branches used in `Value.union()` or `Value.dynamicUnion()`.
+
+    ```typescript
+    const variants = Variants.of({
+      http: { name: 'HTTP', spec: InputSpec.of({ ... }) },
+      https: { name: 'HTTPS', spec: InputSpec.of({ ... }) },
+    })
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.List">
+    Build list-type inputs for use with `Value.list()`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Triggers
+
+Polling strategy functions that determine how frequently a health check fires.
+
+<AccordionGroup>
+  <Accordion title="sdk.trigger.defaultTrigger">
+    Polls every 1 second while the daemon is in a pending state (`starting`, `waiting`, or `failure`). Switches to every 30 seconds once the first non-pending result is observed.
+
+    ```typescript
+    sdk.trigger.defaultTrigger: Trigger
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.trigger.cooldownTrigger">
+    Fixed interval between health check polls.
+
+    ```typescript
+    sdk.trigger.cooldownTrigger(intervalMs: number): Trigger
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.trigger.statusTrigger">
+    Per-status polling intervals. Map each health status to a cooldown in milliseconds. Statuses not listed fall back to 30 seconds.
+
+    ```typescript
+    sdk.trigger.statusTrigger(
+      defaultMs: number,
+      overrides: Partial<Record<HealthStatus, number>>
+    ): Trigger
+    ```
+
+    ```typescript
+    sdk.trigger.statusTrigger(30_000, {
+      starting: 2_000,
+      failure: 5_000,
+    })
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Reactive subscriptions
+
+These methods return `Watchable` instances with `const()`, `once()`, `watch()`, `onChange()`, and `waitFor()` APIs. See [Effects: reactive subscription pattern](/sdk/api/effects#reactive-subscription-pattern) for full usage.
+
+| Method | Returns | Underlying effect |
+|--------|---------|-------------------|
+| `sdk.getContainerIp(effects, opts?)` | `GetContainerIp` | `effects.getContainerIp` |
+| `sdk.getStatus(effects, opts?)` | `GetStatus` | `effects.getStatus` |
+| `sdk.getSystemSmtp(effects)` | `GetSystemSmtp` | `effects.getSystemSmtp` |
+| `sdk.getOutboundGateway(effects)` | `GetOutboundGateway` | `effects.getOutboundGateway` |
+| `sdk.getSslCertificate(effects, hostnames, algorithm?)` | `GetSslCertificate` | `effects.getSslCertificate` |
+| `sdk.getServiceManifest(effects, packageId)` | `GetServiceManifest` | `effects.getServiceManifest` |
+
+```typescript
+// Rebuild config whenever the SSL certificate is renewed
+const [cert, , root] = await sdk.getSslCertificate(effects, [hostname]).const()
+await configFile.merge({ tls: { cert, ca: root } })
+```
+
+---
+
+### Plugins
+
+The plugin sub-object is `null` unless the relevant plugin is declared in the manifest's `plugins` array. TypeScript enforces this statically.
+
+<AccordionGroup>
+  <Accordion title="sdk.plugin.url.register">
+    Register the `url-v0` plugin, binding it to the action that handles URL table interactions.
+
+    ```typescript
+    sdk.plugin.url.register(
+      effects: Effects,
+      options: { tableAction: ActionInfo<ActionId, { urlPluginMetadata: ... }> }
+    ): Promise<null>
+    ```
+
+    Only available when `'url-v0'` is in `Manifest['plugins']`.
+  </Accordion>
+
+  <Accordion title="sdk.plugin.url.exportUrl">
+    Export a URL entry with remove and overflow action bindings.
+
+    ```typescript
+    sdk.plugin.url.exportUrl(
+      effects: Effects,
+      options: {
+        hostnameInfo: PluginHostnameInfo
+        removeAction: ActionInfo<...> | null
+        overflowActions: ActionInfo<...>[]
+      }
+    ): Promise<null>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+### Direct Effects wrappers
+
+These methods on the `sdk` object are thin wrappers around `Effects` methods, passing `effects` as the first argument for ergonomics. They do not add reactive behavior.
+
+| Method | Wraps |
+|--------|-------|
+| `sdk.restart(effects)` | `effects.restart()` |
+| `sdk.shutdown(effects)` | `effects.shutdown()` |
+| `sdk.setHealth(effects, o)` | `effects.setHealth(o)` |
+| `sdk.mount(effects, opts)` | `effects.mount(opts)` |
+| `sdk.clearBindings(effects, opts)` | `effects.clearBindings(opts)` |
+| `sdk.setDependencies(effects, opts)` | `effects.setDependencies(opts)` |
+| `sdk.getDependencies(effects)` | `effects.getDependencies()` |
+| `sdk.getInstalledPackages(effects)` | `effects.getInstalledPackages()` |
+| `sdk.getServicePortForward(effects, opts)` | `effects.getServicePortForward(opts)` |
+| `sdk.getOsIp(effects)` | `effects.getOsIp()` |
+| `sdk.getSslKey(effects, opts)` | `effects.getSslKey(opts)` |
+
+---
+
+### Utilities
+
+<AccordionGroup>
+  <Accordion title="sdk.nullIfEmpty">
+    Return `null` if the given string is empty (`''`), otherwise return the string unchanged. Useful for converting empty text inputs into explicit `null` values in configuration.
+
+    ```typescript
+    sdk.nullIfEmpty(value: string): string | null
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.useEntrypoint">
+    Signal that a daemon or subcontainer should use the container image's built-in entrypoint rather than a custom command.
+
+    ```typescript
+    sdk.useEntrypoint(overrideCmd?: string[]): UseEntrypoint
+    ```
+
+    Pass an optional `overrideCmd` array to append arguments after the entrypoint.
+  </Accordion>
+
+  <Accordion title="sdk.patterns">
+    Common regex patterns and validators used in input spec validation and interface configuration (e.g. hostname format, port ranges).
+
+    ```typescript
+    sdk.patterns.hostname   // Regex for valid hostnames
+    sdk.patterns.port       // Regex for valid port numbers
+    // ...
+    ```
+  </Accordion>
+
+  <Accordion title="sdk.setDataVersion / sdk.getDataVersion">
+    Manage the data migration version during init scripts.
+
+    ```typescript
+    sdk.setDataVersion(effects: Effects, version: string | null): Promise<null>
+    sdk.getDataVersion(effects: Effects): Promise<string | null>
+    ```
+
+    Call `setDataVersion` at the end of each migration step and `getDataVersion` at the start of `init` to determine which migrations still need to run.
+
+    ```typescript
+    const current = await sdk.getDataVersion(effects)
+    if (!current || current < '1.1.0:0') {
+      await runMigrationV1_1(effects)
+      await sdk.setDataVersion(effects, '1.1.0:0')
+    }
+    ```
+  </Accordion>
+</AccordionGroup>

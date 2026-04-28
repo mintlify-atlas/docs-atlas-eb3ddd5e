@@ -1,133 +1,72 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "StartOS: Self-Hosted Server OS"
+description: "StartOS is an open-source Linux OS for running your own personal server — install, manage, and own your self-hosted services with one click."
 ---
 
-## Setting up
+StartOS is an open-source Linux distribution that turns commodity hardware into a fully managed personal server. It handles service discovery, installation, networking, backups, and health monitoring — so you stay in control of your data without needing to be a systems administrator.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Install StartOS" icon="server" href="/getting-started/installation">
+    Flash StartOS to your hardware and get your personal server running in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Set up your server, connect a device, and install your first service.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="How it works" icon="microchip" href="/concepts/architecture">
+    Explore the Rust backend, Angular UI, LXC containers, and Patch-DB sync layer.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Package a service" icon="box" href="/sdk/quickstart">
+    Use the TypeScript SDK to package any Docker-based app for the Start9 Marketplace.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can do with StartOS
 
-Everything you need to create world-class documentation.
+StartOS lets you replace cloud services with self-hosted alternatives you fully own. Browse and install services from the [Start9 Marketplace](https://marketplace.start9.com/) — including Bitcoin nodes, Lightning wallets, encrypted messaging, and cloud storage — all from a single web interface.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Manage services" icon="sliders" href="/admin/managing-services">
+    Install, configure, update, and monitor services from the admin UI.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Networking" icon="network-wired" href="/concepts/networking">
+    Tor hidden services, WireGuard VPN, LAN, and automatic ACME/SSL certificates.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Backups & storage" icon="database" href="/concepts/backups-and-storage">
+    Encrypted rsync backups to local drives, network shares, or cloud storage.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="System settings" icon="gear" href="/admin/system-settings">
+    Configure WiFi, SSH, domains, notifications, and system-wide preferences.
   </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## For service developers
 
-Make your docs work for humans and AI agents alike.
+The `@start9labs/start-sdk` TypeScript SDK provides everything you need to package third-party software as a signed `.s9pk` file for StartOS.
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
+<CardGroup cols={2}>
+  <Card title="SDK introduction" icon="code" href="/sdk/introduction">
+    Learn the SDK architecture, core concepts, and the service packaging lifecycle.
   </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
+  <Card title="Manifest & package format" icon="file-code" href="/sdk/manifest">
+    Define your service's metadata, images, volumes, and dependencies.
   </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
+  <Card title="Daemons & health checks" icon="heart-pulse" href="/sdk/main-and-daemons">
+    Configure multi-process topologies with startup ordering and health probes.
   </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
+  <Card title="Effects API reference" icon="terminal" href="/sdk/api/effects">
+    Full reference for the Effects interface — the bridge to the StartOS runtime.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Contributing
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+StartOS is MIT-licensed and community-driven. Whether you want to improve the core OS, package a new service, or help with documentation, there's a place for you.
+
+<CardGroup cols={2}>
+  <Card title="Development setup" icon="wrench" href="/contributing/development-setup">
+    Set up a Debian/Ubuntu build environment and run StartOS locally.
+  </Card>
+  <Card title="Build system" icon="hammer" href="/contributing/build-system">
+    Understand the Make-based build pipeline, environment variables, and targets.
+  </Card>
+</CardGroup>

@@ -1,0 +1,58 @@
+---
+title: "StartOS: open-source personal server OS"
+description: "StartOS is a Linux distribution that manages self-hosted services on your own hardware — handling networking, backups, health monitoring, and more."
+---
+
+StartOS is an open-source Linux distribution built for running a personal server. It handles the hard parts of self-hosting — service discovery and installation, network configuration, encrypted backups, and continuous health monitoring — so you can own your data and infrastructure without needing a background in systems administration. Services run in isolated LXC containers, installed as signed `.s9pk` packages directly from the [Start9 Marketplace](https://marketplace.start9.com/).
+
+## What StartOS does for you
+
+Rather than manually configuring each application, its reverse proxy, its SSL certificates, and its update pipeline, StartOS manages all of that centrally. Install a service with one click, and StartOS provisions the container, wires up networking, and begins monitoring it automatically.
+
+<CardGroup cols={2}>
+  <Card title="Install StartOS" icon="server" href="/getting-started/installation">
+    Flash StartOS to your own hardware or buy a pre-loaded Start9 server.
+  </Card>
+  <Card title="Quickstart guide" icon="rocket" href="/getting-started/quickstart">
+    Connect to your server, run the setup wizard, and install your first service.
+  </Card>
+  <Card title="Networking" icon="network-wired" href="/concepts/networking">
+    Tor .onion addresses, WireGuard VPN, LAN access, and automatic SSL via ACME.
+  </Card>
+  <Card title="Package a service" icon="box" href="/sdk/quickstart">
+    Use the TypeScript SDK to package any app as a signed S9PK for the marketplace.
+  </Card>
+</CardGroup>
+
+## Key capabilities
+
+**Service management** — Browse, install, configure, update, and remove services from a single web UI. Each service runs in its own LXC container, isolated from the host and from other services.
+
+**Networking** — StartOS configures Tor hidden services and WireGuard VPN automatically. Every service gets a `.onion` address for private remote access without port-forwarding. WireGuard provides a fast, encrypted LAN-style tunnel when Tor latency is unacceptable.
+
+**Backups** — Encrypted, incremental backups using rsync. Targets include USB drives, network shares (SFTP/SMB), and cloud-compatible storage. Backups are verified on restore.
+
+**Health monitoring** — The daemon continuously polls each service's declared health checks and surfaces the result in the admin UI. If a dependency fails, dependent services are automatically paused and their status updated.
+
+## Tech stack
+
+StartOS is built on a modern, deliberately chosen stack:
+
+- **Rust backend** — A single `startbox` binary compiled with Tokio and Axum serves the JSON-RPC API, manages the service lifecycle, handles DNS/ACME/WiFi/Tor/WireGuard networking, and owns all database state.
+- **Angular 21 frontend** — Three web applications (admin UI, setup wizard, VPN management) built with TypeScript and Taiga UI 5. The UI communicates with the backend exclusively over JSON-RPC.
+- **Node.js container runtime** — A TypeScript process that runs inside each service's LXC container, loading the service's JavaScript from its S9PK and managing sub-containers.
+- **Patch-DB** — A custom diff-based state store using CBOR encoding. Backend mutations produce diffs pushed to the frontend over WebSocket, giving the UI reactive updates without polling.
+- **S9PK packages** — A signed, merkle-archived format that supports partial downloads and cryptographic verification, ensuring every installed service is authentic and untampered.
+
+## Who StartOS is for
+
+StartOS is designed for anyone who wants to move off third-party cloud services and take direct ownership of their data:
+
+- **Privacy-conscious users** who want communication and storage tools they fully control
+- **Bitcoin and Lightning enthusiasts** running full nodes, Lightning nodes, BTCPay Server, and related payment infrastructure
+- **Self-hosters** replacing Google Drive, Dropbox, Slack, or other SaaS tools with open-source alternatives like Nextcloud, Matrix, and Vaultwarden
+- **Developers** packaging new services for the marketplace using the `@start9labs/start-sdk` TypeScript SDK
+
+<Note>
+  StartOS is MIT-licensed and community-driven. See the [contribution guide](/contributing/development-setup) to get involved.
+</Note>

@@ -1,0 +1,179 @@
+---
+title: "Services, Packages, and the S9PK Format Explained"
+description: "How StartOS services run in isolated LXC containers, the S9PK package format, the manifest schema, extended versioning, and the full service lifecycle."
+---
+
+In StartOS, a *service* is a self-hosted application — a Bitcoin node, a file sync server, a password manager — running in its own isolated LXC container. A *package* is the distributable artifact that describes and contains the service: its container images, JavaScript lifecycle code, metadata, and cryptographic signatures. Packages use the `.s9pk` format, a signed merkle archive designed for efficient streaming and verifiable integrity.
+
+## Services as isolated containers
+
+Each installed service runs in a dedicated LXC container. Isolation is enforced at the OS level: services cannot access each other's filesystems or network interfaces except through explicitly declared dependencies and exported interfaces. The container runtime (`start-container` / `container-runtime/`) runs inside the container and communicates with the host `startd` daemon via JSON-RPC over a Unix socket.
+
+Services declare their resource requirements in a manifest — the container images they need, the volumes they write to, the ports they bind, and the other services they depend on.
+
+## The S9PK package format
+
+S9PK v2 is a merkle archive with a 3-byte magic header (`0x3b 0x3b 0x02`). The entire archive is signed using Ed25519 with a prehashed content (SHA-512 over the blake3 merkle root hash), allowing any subset of the archive to be verified independently.
+
+### Archive structure
+
+```text
+/
+├── manifest.json           # Package metadata (required)
+├── icon.<ext>              # Package icon — any image/* format (required)
+├── LICENSE.md              # License text (required)
+├── dependencies/           # Dependency metadata (optional)
+│   └── <package-id>/
+│       ├── metadata.json   # DependencyMetadata
+│       └── icon.<ext>      # Dependency icon
+├── javascript.squashfs     # Package JavaScript code (required)
+├── assets.squashfs         # Static assets (optional)
+└── images/                 # Container images by architecture
+    └── <arch>/             # e.g., x86_64, aarch64, riscv64
+        ├── <image-id>.squashfs  # Container root filesystem
+        ├── <image-id>.json      # Image metadata (entrypoint, user, workdir)
+        └── <image-id>.env       # Environment variables
+```
+
+Files are sorted by priority for streaming: manifest first, then icon, license, dependencies, javascript, assets, and finally container images. This lets StartOS display package metadata and begin validation before the large image files finish downloading.
+
+### The manifest
+
+The `manifest.json` file is the authoritative source of truth for a package. Every field is typed and validated at install time:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Package identifier, e.g. `bitcoind` |
+| `title` | string | Display name shown in the UI |
+| `version` | string | Extended version string (see ExVer below) |
+| `satisfies` | string[] | Version ranges this release satisfies |
+| `releaseNotes` | string or object | Release notes, optionally localized |
+| `canMigrateTo` | string | Version range for forward data migration |
+| `canMigrateFrom` | string | Version range for backward data migration |
+| `license` | string | License identifier, e.g. `MIT` |
+| `wrapperRepo` | string | URL of the StartOS packaging repository |
+| `upstreamRepo` | string | URL of the upstream project |
+| `description` | object | Short and long descriptions, localized |
+| `images` | object | Image configs keyed by image ID |
+| `volumes` | string[] | Volume IDs for persistent data |
+| `dependencies` | object | Declared inter-service dependencies |
+| `hardwareRequirements` | object | Architecture, RAM, and device requirements |
+| `osVersion` | string | Minimum StartOS version required |
+| `sdkVersion` | string? | SDK version used to build the package |
+
+### Container images
+
+Images are built from Docker or Podman and converted to squashfs. The archive carries one squashfs image per supported architecture (e.g. `x86_64`, `aarch64`, `riscv64`) so that the same package file installs on any hardware StartOS supports. The `emulateMissingAs` field in the image config enables QEMU-based fallback for unsupported architectures.
+
+### The JavaScript layer
+
+`javascript.squashfs` is mounted at `/usr/lib/startos/package/` inside the container. The runtime loads `index.js` and expects it to export the `ABI` interface defined by `@start9labs/start-sdk-base`:
+
+```typescript
+namespace ExpectedExports {
+  main         // Start the service daemon(s)
+  init         // Run on install, update, or restore
+  uninit       // Run on uninstall, update, or shutdown
+  manifest     // Service metadata
+  actions      // User-invocable operations
+  createBackup // Export service data to the backup location
+}
+```
+
+## Extended versioning (ExVer)
+
+StartOS uses an extended versioning format — ExVer — that separates the upstream project version from the StartOS packaging version. This allows package maintainers to ship wrapper updates (bug fixes, configuration improvements) without waiting for the upstream project to release a new version.
+
+### Format
+
+```text
+[#flavor:]upstream:downstream
+```
+
+- **upstream** — the original project's semver-style version, e.g. `26.0`
+- **downstream** — the wrapper version, incremented independently
+- **flavor** — optional prefix for package fork variants, e.g. `#bitcoin`
+
+**Examples:**
+
+| Version string | Meaning |
+|---|---|
+| `26.0:0` | Upstream 26.0, first packaging release |
+| `26.0:2` | Upstream 26.0, third packaging release |
+| `#bitcoin:26.0:1` | Bitcoin flavor, upstream 26.0, second packaging release |
+| `1.0.0-rc.1:0` | Upstream release candidate, first packaging release |
+
+<Note>
+  Versions with different flavors are never comparable using ordering operators. `#bitcoin:26.0:0` and `26.0:0` are distinct, incompatible version lines. Use `VersionRange::Flavor` predicates to match flavor-specific packages.
+</Note>
+
+Version ranges use familiar operators (`>=`, `^`, `~`, `=`) and compose with boolean logic:
+
+```text
+>=26.0:0 <27.0:0    # compatible with 26.x
+^26.0:0             # caret: same as above (first non-zero digit unchanged)
+#bitcoin            # any version with bitcoin flavor
+```
+
+## Service lifecycle
+
+A service moves through a well-defined lifecycle managed by the `service_actor.rs` in the core backend. The JavaScript exports map directly onto these stages:
+
+<Tabs>
+  <Tab title="Install / update / restore">
+    The `init` export runs with a `kind` parameter indicating the trigger: `'install'`, `'update'`, `'restore'`, or `null` (boot). Init scripts set up dependencies, bind ports, export service interfaces, register actions, and run data migrations when upgrading.
+
+    ```typescript
+    export const init: T.ExpectedExports.init = async ({ effects, input }) => {
+      await sdk.setupDependencies(effects, dependencies)
+      await sdk.setupInterfaces(effects, interfaces)
+    }
+    ```
+  </Tab>
+  <Tab title="Main (running)">
+    The `main` export starts the service's long-running daemons. `Daemons.of()` builds a process topology with startup ordering, ready probes, and health checks.
+
+    ```typescript
+    export const main: T.ExpectedExports.main = sdk.setupMain(
+      async ({ effects, started }) => {
+        return sdk.Daemons.of(effects)
+          .addDaemon('app', {
+            command: ['my-service', '--port', '8080'],
+            ready: { display: 'App ready', fn: () => checkWebUrl('http://localhost:8080') },
+            requires: [],
+          })
+          .build()
+      }
+    )
+    ```
+  </Tab>
+  <Tab title="Backup">
+    The `createBackup` export is invoked by StartOS when the user triggers a backup. The SDK's `Backups.ofVolumes()` helper uses rsync to copy named volumes to the encrypted backup destination.
+
+    ```typescript
+    export const createBackup: T.ExpectedExports.createBackup =
+      sdk.setupBackups(sdk.Backups.ofVolumes('main', 'data'))
+    ```
+  </Tab>
+  <Tab title="Uninit / uninstall">
+    The `uninit` export runs before update or uninstall. It receives a `target` field indicating what will happen next, allowing services to run down-migrations or clean up state before the container is destroyed.
+  </Tab>
+</Tabs>
+
+## Building and installing packages
+
+Packages are built with the `start-cli s9pk pack` command:
+
+```bash
+start-cli s9pk pack <manifest-path> -o output.s9pk
+```
+
+Images can be sourced from a Docker build, an existing Docker tag, or pre-built squashfs files. The CLI handles merkle tree construction and Ed25519 signing automatically.
+
+When a user installs a package from the marketplace, StartOS:
+
+1. Downloads the `.s9pk` file from the registry
+2. Verifies the Ed25519 signature against the package's public key
+3. Streams and extracts files in priority order (manifest and icon first)
+4. Selects the correct container image for the device's architecture
+5. Registers the service in the database and begins the `init` lifecycle stage

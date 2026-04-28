@@ -1,0 +1,315 @@
+---
+title: "User Actions: Interactive Operations in the StartOS UI"
+description: "Define user-invocable operations with validated form inputs using Action.withInput and Action.withoutInput, and compose them with Actions.of().addAction()."
+---
+
+Actions are named operations that users can trigger from the StartOS service interface. Unlike daemons (which run continuously) or health checks (which run automatically), actions run on demand: a user clicks a button in the UI, optionally fills in a form, and the action executes. Common uses include setting a password, rotating API keys, creating a wallet, exporting a backup, triggering a sync, or any other administrative task your service needs to surface. Actions appear in the service's detail page under an "Actions" section and can be made conditionally visible based on the service's running state.
+
+## Action types
+
+The SDK provides two factory methods on the `Action` object:
+
+<AccordionGroup>
+  <Accordion title="Action.withInput — form-backed action">
+    `Action.withInput` presents a validated form to the user before executing. The form is defined using `InputSpec` and `Value` builders. The `execute` function receives the validated, typed form data.
+
+    Use this when your action needs user-provided values: a name to set, a port to reconfigure, a passphrase to apply.
+  </Accordion>
+  <Accordion title="Action.withoutInput — instant action">
+    `Action.withoutInput` executes immediately without showing a form. The OS may display a confirmation prompt based on action metadata. Use this for operations that require no parameters, such as "Restart Tor" or "Rescan Blockchain".
+  </Accordion>
+</AccordionGroup>
+
+## Defining actions
+
+### Action with input
+
+```typescript
+export const setName = sdk.Action.withInput(
+  'set-name',                             // Stable action ID — never change this
+  {                                       // ActionMetadata
+    name: 'Set Display Name',
+    description: 'Update the display name shown in the service header.',
+    visibility: 'enabled',
+    availability: 'running',
+  },
+  sdk.InputSpec.of()                      // Input specification (the form)
+    .addField('name', sdk.Value.text({
+      name: 'Display Name',
+      required: true,
+      default: null,
+      placeholder: 'My Node',
+      minLength: 1,
+      maxLength: 64,
+    })),
+  async ({ effects, prefill }) => {       // Prefill function — populate form from current state
+    return prefill
+  },
+  async ({ effects, input }) => {         // Execute function — receives validated input
+    await configFile.merge(effects, { displayName: input.name })
+    return { version: '1', title: 'Name updated', message: null, result: null }
+  },
+)
+```
+
+### Action without input
+
+```typescript
+export const rescan = sdk.Action.withoutInput(
+  'rescan-blockchain',
+  {
+    name: 'Rescan Blockchain',
+    description: 'Force a full blockchain rescan. This may take several hours.',
+    visibility: 'enabled',
+    availability: 'running',
+  },
+  async ({ effects }) => {
+    await effects.restart()
+    return { version: '1', title: 'Rescan started', message: null, result: null }
+  },
+)
+```
+
+## ActionMetadata fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | Display name shown in the UI |
+| `description` | `string` | Explanatory text shown beneath the name |
+| `visibility` | `'enabled' \| 'disabled' \| 'hidden'` | Whether the action is shown and clickable |
+| `availability` | `'running' \| 'stopped' \| 'any'` | Service state in which the action can be triggered |
+
+<Tip>
+Use `availability: 'stopped'` for setup actions that must run before starting the service (e.g. initializing a wallet), and `availability: 'running'` for live operations that require the daemon to be active.
+</Tip>
+
+## Input specification system
+
+The `InputSpec` builder accumulates typed form fields. Each call to `.addField(key, value)` appends a field and narrows the TypeScript type, so the `execute` function's `input` parameter is fully typed without any casting.
+
+```typescript
+const mySpec = sdk.InputSpec.of()
+  .addField('port', sdk.Value.number({
+    name: 'Port',
+    required: true,
+    default: 8080,
+    integer: true,
+    min: 1,
+    max: 65535,
+    units: null,
+  }))
+  .addField('debug', sdk.Value.toggle({
+    name: 'Debug mode',
+    default: false,
+  }))
+  .addField('mode', sdk.Value.select({
+    name: 'Mode',
+    values: {
+      production: 'Production',
+      dev: 'Development',
+    },
+    default: 'production',
+  }))
+```
+
+## Value types
+
+All field types are created via static factory methods on `sdk.Value`. Every type has a static variant (options resolved at build time) and a `dynamic` variant (options resolved lazily at runtime from existing form data).
+
+<Tabs>
+  <Tab title="Text & numbers">
+
+```typescript
+// Single-line text input
+sdk.Value.text({
+  name: 'Label',
+  required: true,
+  default: null,
+  placeholder: 'Enter text...',
+  masked: false,           // Mask with ● ● ● (for passwords)
+  minLength: null,
+  maxLength: null,
+  patterns: [],            // Regex validation rules
+})
+
+// Multi-line textarea
+sdk.Value.textarea({
+  name: 'Notes',
+  required: false,
+  default: null,
+  minRows: 3,
+  maxRows: 8,
+})
+
+// Numeric input
+sdk.Value.number({
+  name: 'Port',
+  required: true,
+  default: 8080,
+  integer: true,
+  min: 1,
+  max: 65535,
+  step: null,
+  units: null,
+})
+```
+
+  </Tab>
+  <Tab title="Toggle & select">
+
+```typescript
+// Boolean toggle switch
+sdk.Value.toggle({
+  name: 'Enable feature',
+  default: false,
+})
+
+// Three-state toggle: false / null / true
+sdk.Value.triState({
+  name: 'Override',
+  default: null,           // null = neutral/inherit
+})
+
+// Single-choice radio buttons
+sdk.Value.select({
+  name: 'Log level',
+  values: {
+    error: 'Error only',
+    warn: 'Warnings',
+    info: 'Info',
+    debug: 'Debug',
+  },
+  default: 'info',
+})
+
+// Multi-choice checkboxes
+sdk.Value.multiselect({
+  name: 'Features',
+  values: {
+    rpc: 'RPC server',
+    indexer: 'Address indexer',
+    zmq: 'ZMQ publisher',
+  },
+  default: ['rpc'],
+})
+```
+
+  </Tab>
+  <Tab title="Complex types">
+
+```typescript
+// Nested sub-form
+sdk.Value.object(
+  { name: 'TLS settings' },
+  sdk.InputSpec.of()
+    .addField('cert', sdk.Value.text({ name: 'Certificate', required: true, default: null }))
+    .addField('key', sdk.Value.text({ name: 'Private key', required: true, default: null, masked: true })),
+)
+
+// Discriminated union (different sub-forms per variant)
+sdk.Value.union(
+  { name: 'Storage backend', default: 'sqlite' },
+  sdk.Variants.of({
+    sqlite: {
+      name: 'SQLite',
+      spec: sdk.InputSpec.of()
+        .addField('path', sdk.Value.text({ name: 'Database path', required: true, default: '/data/db.sqlite' })),
+    },
+    postgres: {
+      name: 'PostgreSQL',
+      spec: sdk.InputSpec.of()
+        .addField('url', sdk.Value.text({ name: 'Connection URL', required: true, default: null })),
+    },
+  }),
+)
+
+// Repeatable list
+sdk.Value.list(
+  sdk.List.text(
+    { name: 'Peer addresses', default: [], minLength: null, maxLength: null },
+    { patterns: [], inputmode: 'url', placeholder: 'hostname:port' },
+  ),
+)
+
+// Date/time picker
+sdk.Value.datetime({
+  name: 'Start time',
+  required: false,
+  default: null,
+  inputmode: 'datetime-local',
+})
+
+// Color picker
+sdk.Value.color({
+  name: 'Accent color',
+  required: false,
+  default: null,
+})
+
+// File upload
+sdk.Value.file({
+  name: 'TLS Certificate',
+  required: false,
+  extensions: ['.pem', '.crt'],
+})
+```
+
+  </Tab>
+</Tabs>
+
+## Accumulating actions
+
+`Actions.of()` creates an empty action registry. Chain `.addAction()` calls to accumulate each action. The resulting `Actions` object is passed to the service's `actions` export.
+
+```typescript
+export const actions = sdk.Actions.of()
+  .addAction(setName)
+  .addAction(rescan)
+  .addAction(exportBackup)
+```
+
+TypeScript tracks which action IDs have been registered, so calling `.get('unknown-id')` on the resulting object is a compile-time error.
+
+## Complete example
+
+```typescript
+import { sdk } from './sdk'
+import { configFile } from './files'
+
+// Define an action that sets the RPC password
+export const setRpcPassword = sdk.Action.withInput(
+  'set-rpc-password',
+  {
+    name: 'Set RPC Password',
+    description: 'Update the password used to authenticate RPC calls.',
+    visibility: 'enabled',
+    availability: 'running',
+  },
+  sdk.InputSpec.of()
+    .addField('password', sdk.Value.text({
+      name: 'New Password',
+      required: true,
+      default: { charset: 'a-z,A-Z,0-9', len: 32 },
+      masked: true,
+    })),
+  async ({ effects }) => null,
+  async ({ effects, input }) => {
+    await configFile.merge(effects, { rpcpassword: input.password })
+    await effects.restart()
+    return {
+      version: '1',
+      title: 'RPC password updated',
+      message: 'The service has been restarted with the new password.',
+      result: null,
+    }
+  },
+)
+
+// Collect all actions
+export const actions = sdk.Actions.of()
+  .addAction(setRpcPassword)
+```
+
+<Note>
+The action `id` (first argument to `Action.withInput` or `Action.withoutInput`) must remain stable across package versions. Changing it would break any automation or bookmarks that reference the old ID.
+</Note>

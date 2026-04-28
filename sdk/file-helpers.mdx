@@ -1,0 +1,287 @@
+---
+title: "File Helpers: Type-Safe Configuration File Management"
+description: "Read, write, and merge config files in JSON, YAML, TOML, INI, and ENV formats using FileHelper's Zod-validated reactive API with TypeScript type inference."
+---
+
+Configuration files are how most services persist and communicate settings. `FileHelper` wraps configuration file I/O in a type-safe, format-aware API that handles parsing, serialization, partial merging, and reactive reading. Rather than manually calling `fs.writeFile` with `JSON.stringify` and hoping the result matches what your service expects, you define a schema once and let `FileHelper` enforce it on every read and write. The same schema that validates incoming data also drives TypeScript inference, so your editor knows the shape of your config without any manual type annotations.
+
+## Creating a FileHelper
+
+Choose the factory method that matches your configuration file format. Every factory method takes a file path and a Zod validator. The validator defines both the runtime schema (used to parse and validate file contents) and the TypeScript type (used throughout your service code).
+
+<Tabs>
+  <Tab title="YAML">
+
+```typescript
+import { z } from 'zod'
+import { FileHelper } from '@start9labs/start-sdk'
+
+const configFile = FileHelper.yaml(
+  sdk.volumes.main.subpath('config.yml'),
+  z.object({
+    port: z.number().int().min(1).max(65535).default(8080),
+    debug: z.boolean().default(false),
+    logLevel: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
+    rpcUrl: z.string().url().nullable().default(null),
+  }),
+)
+```
+
+  </Tab>
+  <Tab title="JSON">
+
+```typescript
+const stateFile = FileHelper.json(
+  sdk.volumes.main.subpath('state.json'),
+  z.object({
+    initialized: z.boolean().default(false),
+    lastSeen: z.string().nullable().default(null),
+    peers: z.array(z.string()).default([]),
+  }),
+)
+```
+
+  </Tab>
+  <Tab title="TOML">
+
+```typescript
+const settingsFile = FileHelper.toml(
+  sdk.volumes.main.subpath('settings.toml'),
+  z.object({
+    network: z.object({
+      bind: z.string().default('0.0.0.0'),
+      port: z.number().int().default(9735),
+    }),
+    database: z.object({
+      path: z.string().default('/data/db'),
+    }),
+  }),
+)
+```
+
+  </Tab>
+  <Tab title="INI">
+
+```typescript
+const iniFile = FileHelper.ini(
+  sdk.volumes.main.subpath('service.ini'),
+  z.object({
+    server: z.object({
+      host: z.string().default('localhost'),
+      port: z.string().default('8080'),
+    }),
+  }),
+)
+```
+
+  </Tab>
+  <Tab title="ENV">
+
+```typescript
+const envFile = FileHelper.env(
+  sdk.volumes.main.subpath('.env'),
+  z.object({
+    DATABASE_URL: z.string(),
+    SECRET_KEY: z.string(),
+    DEBUG: z.string().default('false'),
+  }),
+)
+```
+
+  </Tab>
+  <Tab title="Custom (raw)">
+
+```typescript
+// For formats without a built-in factory method
+const confFile = FileHelper.raw(
+  sdk.volumes.main.subpath('bitcoin.conf'),
+  (data) => Object.entries(data).map(([k, v]) => `${k}=${v}`).join('\n'),
+  (raw) => Object.fromEntries(
+    raw.split('\n')
+      .filter(line => line.includes('='))
+      .map(line => line.split('=', 2) as [string, string])
+  ),
+  (data) => z.record(z.string()).parse(data),
+)
+```
+
+  </Tab>
+</Tabs>
+
+## Path helpers
+
+Use `sdk.volumes.<volumeId>.subpath(subpath)` to construct absolute paths relative to a mounted volume. Each volume's root is at `/media/startos/volumes/<id>/`. This avoids hardcoding absolute container paths and ensures the path stays consistent with your manifest's volume declarations.
+
+```typescript
+sdk.volumes.main.subpath('config.yml')     // → /media/startos/volumes/main/config.yml
+sdk.volumes.data.subpath('db/state.json')  // → /media/startos/volumes/data/db/state.json
+```
+
+<Note>
+Volume IDs in `sdk.volumes` are type-checked against your manifest's `volumes` declaration, so referencing an undeclared volume is a compile-time error.
+</Note>
+
+## Reading files
+
+The `read()` method returns an object with multiple strategies for reading the file. Choose the strategy based on whether you need reactivity.
+
+### Reactive read with `const`
+
+`read().const(effects)` is the most common read pattern. It reads the file once and returns the parsed value. If the file changes after the read, the SDK automatically retries the calling context — any `setupInterfaces`, `setupMain`, or action that called `const()` will re-run with the new value.
+
+```typescript
+// In setupInterfaces or any reactive context
+const config = await configFile.read().const(effects)
+// config is fully typed: { port: number; debug: boolean; logLevel: string; rpcUrl: string | null }
+```
+
+### One-time read with `once`
+
+`read().once()` reads the file a single time without any reactive subscription. Use this when you need the current value but don't need to react to future changes.
+
+```typescript
+const config = await configFile.read().once()
+```
+
+### Watch as async generator
+
+`read().watch(effects)` yields the current value and then yields again on every subsequent change. Use this in long-running loops.
+
+```typescript
+for await (const config of configFile.read().watch(effects)) {
+  if (config) {
+    console.log('Config updated, port is now:', config.port)
+  }
+}
+```
+
+### Callback on change
+
+`read().onChange(effects, callback)` fires a callback function on every change. Return `{ cancel: false }` to keep watching or `{ cancel: true }` to stop.
+
+```typescript
+configFile.read().onChange(effects, async (config, error) => {
+  if (error) return { cancel: true }
+  if (config) await applyConfig(config)
+  return { cancel: false }
+})
+```
+
+### Wait for a condition
+
+`read().waitFor(effects, predicate)` blocks until the file's value satisfies the predicate function.
+
+```typescript
+// Block until the config file exists and has a non-null rpcUrl
+const config = await configFile.read().waitFor(effects, (c) => c?.rpcUrl != null)
+```
+
+## Writing files
+
+### Full write
+
+`write(effects, data)` validates the provided data against the schema and overwrites the entire file on disk.
+
+```typescript
+await configFile.write(effects, {
+  port: 9090,
+  debug: true,
+  logLevel: 'debug',
+  rpcUrl: 'http://localhost:8332',
+})
+```
+
+### Partial merge
+
+`merge(effects, data)` performs a deep partial merge. You only need to provide the fields you want to change; all other fields retain their current values. Missing nested objects are created automatically.
+
+```typescript
+// Only update debug — all other fields stay as-is
+await configFile.merge(effects, { debug: true })
+
+// Update a nested field
+await settingsFile.merge(effects, {
+  network: { port: 9736 },
+})
+```
+
+<Tip>
+Prefer `merge` over `write` when updating a subset of fields. It avoids accidentally clobbering fields your code doesn't own, and it handles the case where the file doesn't exist yet by creating it with defaults merged in.
+</Tip>
+
+## Transformers (advanced)
+
+All factory methods accept an optional `transformers` argument for cases where the file's on-disk representation differs from the application type you want to work with. Provide `onRead` (file → app type) and `onWrite` (app type → file) functions.
+
+```typescript
+// Store timestamps as Unix epoch numbers in the file,
+// but work with Date objects in application code
+const logFile = FileHelper.json(
+  sdk.volumes.main.subpath('log.json'),
+  z.object({
+    lastRun: z.date(),
+  }),
+  {
+    onRead: (raw: { lastRun: number }) => ({ lastRun: new Date(raw.lastRun * 1000) }),
+    onWrite: (data) => ({ lastRun: Math.floor(data.lastRun.getTime() / 1000) }),
+  },
+)
+```
+
+## Watchable reactive API summary
+
+All reactive read methods on `FileHelper` implement the `Watchable` interface, which is shared across the SDK's reactive values (SSL certificates, container IPs, service manifests, etc.).
+
+| Method | Signature | Description |
+|---|---|---|
+| `once()` | `() => Promise<A \| null>` | Read once; no reactivity |
+| `const(effects)` | `(effects: Effects) => Promise<A \| null>` | Read once; retries calling context if file changes |
+| `watch(effects, abort?)` | `(effects, abort?) => AsyncGenerator<A \| null>` | Async generator; yields on each change |
+| `onChange(effects, callback)` | `(effects, cb) => void` | Fires callback on each change |
+| `waitFor(effects, predicate)` | `(effects, pred) => Promise<A \| null>` | Blocks until predicate returns true |
+
+## Complete example
+
+```typescript
+import { z } from 'zod'
+import { sdk } from './sdk'
+
+// Define the config file
+export const configFile = FileHelper.yaml(
+  sdk.volumes.main.subpath('config.yml'),
+  z.object({
+    port: z.number().int().default(8080),
+    debug: z.boolean().default(false),
+    adminUser: z.string().default('admin'),
+    rpcPassword: z.string().nullable().default(null),
+  }),
+)
+
+// Write defaults on first install
+export const setDefaults = sdk.setupOnInit('install', async ({ effects }) => {
+  await configFile.write(effects, {
+    port: 8080,
+    debug: false,
+    adminUser: 'admin',
+    rpcPassword: null,
+  })
+})
+
+// Read reactively in setupMain
+export const main = sdk.setupMain(async ({ effects, started }) => {
+  // Re-runs automatically if config.yml changes
+  const config = await configFile.read().const(effects)
+  if (!config) throw new Error('config.yml is missing')
+
+  return sdk.Daemons.of(effects)
+    .addDaemon('app', {
+      command: ['myservice', '--port', String(config.port)],
+      mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+      ready: {
+        display: 'Service is ready',
+        fn: () => sdk.healthCheck.checkPortListening(effects, config.port),
+      },
+      requires: [],
+    })
+})
+```

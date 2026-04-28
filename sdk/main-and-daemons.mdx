@@ -1,0 +1,188 @@
+---
+title: "Defining the main entry point and service daemons"
+description: "Learn how setupMain and the Daemons builder define multi-process topologies with startup ordering, ready probes, volume mounts, and graceful shutdown."
+---
+
+Every StartOS service exposes a `main` export that the runtime calls to start the service. The SDK's `setupMain()` function is your entry point: you return a configured `Daemons` object that tells StartOS exactly which processes to run, in what order, and how to know when each one is healthy. This model lets you express complex multi-process topologies — a database that must be ready before the application server starts, a background worker that depends on both — in plain TypeScript with full type safety.
+
+## The main entry point
+
+`setupMain()` accepts an async callback that receives an `effects` object and must return a `Daemons` instance. The runtime calls this function each time the service starts.
+
+```typescript
+import { sdk } from './sdk'
+
+export const main = sdk.setupMain(async ({ effects }) =>
+  sdk.Daemons.of(effects)
+    .addDaemon('db', {
+      command: ['postgres', '-D', '/data/pgdata'],
+      ready: {
+        display: 'Database',
+        fn: () => sdk.healthCheck.checkPortListening(effects, 5432, {
+          successMessage: 'Database ready',
+          errorMessage: 'Database not ready',
+        }),
+      },
+      mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+    })
+    .addDaemon('app', {
+      requires: ['db'],
+      command: ['node', 'server.js'],
+      ready: {
+        display: 'App server',
+        fn: () => sdk.healthCheck.checkWebUrl(effects, 'http://localhost:3000/health', {
+          successMessage: 'App server is up',
+          errorMessage: 'App server is not responding',
+        }),
+      },
+      mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+    })
+    .addHealthCheck('primary', {
+      name: 'App server',
+      fn: () => sdk.healthCheck.checkWebUrl(effects, 'http://localhost:3000/health', {
+        successMessage: 'App server is healthy',
+        errorMessage: 'App server is not responding',
+      }),
+      trigger: sdk.trigger.defaultTrigger,
+    })
+)
+```
+
+## Daemon topology with `Daemons.of()`
+
+The `Daemons` builder accumulates process definitions through a chain of `.addDaemon()` calls. Each daemon is identified by a string key used to express dependencies between processes.
+
+```typescript
+sdk.Daemons.of(effects)
+  .addDaemon('db', { /* command, ready probe, mounts */ })
+  .addDaemon('app', { requires: ['db'], /* ... */ })
+  .addHealthCheck('primary', { /* ... */ })
+```
+
+### Startup ordering via `requires`
+
+The `requires` field accepts an array of daemon keys. A daemon will not start until all of its required daemons have passed their ready probe. This forms a dependency graph — StartOS topologically sorts it and starts processes in the correct order.
+
+<Note>
+Circular dependencies between daemons are a type error. The SDK's builder types enforce a directed acyclic graph at compile time.
+</Note>
+
+### Ready probes
+
+Each daemon can declare a `ready` probe — a function that is polled repeatedly until it succeeds. Dependent daemons only start after the ready probe passes. Use the same built-in check functions available to health checks:
+
+| Probe function | What it checks |
+|---|---|
+| `checkPortListening` | Port appears in `/proc/net/tcp` or `/proc/net/udp` |
+| `checkWebUrl` | HTTP fetch to URL succeeds (any response, not just 2xx) |
+| `runHealthScript` | Script exits with code `0` |
+
+### Graceful shutdown
+
+When StartOS stops a service, it sends a configurable signal (default `SIGTERM`) to each daemon and waits for a configurable timeout before sending `SIGKILL`. Configure these per daemon:
+
+```typescript
+.addDaemon('app', {
+  command: ['node', 'server.js'],
+  sigtermTimeout: 30_000,  // ms to wait after SIGTERM before SIGKILL
+  mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+})
+```
+
+Daemons are stopped in reverse startup order — dependents are stopped before the daemons they depend on.
+
+## Mounting volumes and assets
+
+The `Mounts` builder declares what is attached to a container's filesystem before the process starts. It supports four mount types:
+
+```typescript
+sdk.Mounts.of()
+  .mountVolume('main', '/data')
+  .mountAssets('scripts', '/scripts')
+  .mountDependency('bitcoind', 'main', '/bitcoin-data', { readonly: true })
+  .mountBackup('/backup')
+```
+
+<Steps>
+  <Step title="mountVolume(volumeName, containerPath)">
+    Attaches a named volume declared in your manifest to a path inside the container. Use this for any persistent data your service owns.
+  </Step>
+  <Step title="mountAssets(assetName, containerPath)">
+    Mounts a read-only assets bundle (scripts, configuration templates, static files) packed into the `.s9pk` at build time.
+  </Step>
+  <Step title="mountDependency(packageId, volumeName, containerPath, options)">
+    Mounts a volume from another installed service. Pass `{ readonly: true }` when you only need to read the dependency's data.
+  </Step>
+  <Step title="mountBackup(containerPath)">
+    Mounts the backup destination path. Used inside backup/restore subcontainer commands.
+  </Step>
+</Steps>
+
+<Note>
+Volume names passed to `mountVolume()` are type-checked against your manifest at compile time. If you reference a volume not declared in your manifest, TypeScript will report an error.
+</Note>
+
+## One-shot commands
+
+Some setup work should run once before the main daemons start — database migrations, file permission fixups, schema initialization. Add these as one-shot commands with `.addOneshot()`:
+
+```typescript
+sdk.Daemons.of(effects)
+  .addOneshot('migrate', {
+    command: ['node', 'migrate.js'],
+    mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+  })
+    .addDaemon('app', {
+      requires: ['db'],
+      command: ['node', 'server.js'],
+      ready: {
+        display: 'App server',
+        fn: () => sdk.healthCheck.checkWebUrl(effects, 'http://localhost:3000/health', {
+          successMessage: 'App server is up',
+          errorMessage: 'App server not responding',
+        }),
+      },
+      mounts: sdk.Mounts.of().mountVolume('main', '/data'),
+    })
+    .addHealthCheck('primary', {
+      name: 'App server',
+      fn: () => sdk.healthCheck.checkWebUrl(effects, 'http://localhost:3000/health', {
+        successMessage: 'App server is healthy',
+        errorMessage: 'App server is not responding',
+      }),
+      trigger: sdk.trigger.defaultTrigger,
+    })
+```
+
+One-shots run to completion before any dependent daemons start. If a one-shot exits with a non-zero code, startup fails.
+
+## SubContainer execution
+
+For commands that need an isolated container environment (e.g. running migrations with a different image), use `SubContainer.withTemp()`:
+
+```typescript
+await sdk.SubContainer.withTemp(effects, { imageId: 'main' }, mounts, 'migrate', async (c) => {
+  await c.exec(['run-migrations'])
+})
+```
+
+`withTemp` creates a temporary filesystem, runs the async callback, and tears down the container when done. Use `SubContainer.of()` for a long-lived container you manage yourself.
+
+## Health check registration
+
+`.addHealthCheck()` registers a periodic probe that StartOS polls to report the service's health status to the user. Health checks are described in detail in [Health checks](/sdk/health-checks).
+
+```typescript
+.addHealthCheck('primary', {
+  name: 'Web interface',
+  fn: () => sdk.healthCheck.checkWebUrl(effects, 'http://localhost:3000/health', {
+    successMessage: 'Web interface is reachable',
+    errorMessage: 'Web interface is not responding',
+  }),
+  trigger: sdk.trigger.defaultTrigger,
+})
+```
+
+<Tip>
+Every service should register at least one health check. Without one, StartOS has no way to report whether the service is running correctly to the user.
+</Tip>

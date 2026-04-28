@@ -1,0 +1,156 @@
+---
+title: "S9PK archive format: structure, signing, and merkle tree"
+description: "The S9PK binary format: 3-byte magic header, Ed25519 signature, merkle archive layout, and how start-cli assembles and verifies service packages."
+---
+
+An `.s9pk` file is the distributable unit for StartOS services. It bundles everything the runtime needs to install and run a package: the compiled JavaScript lifecycle code, container images for each supported architecture, static assets, a signed manifest, an icon, and a license. The format is designed for cryptographic integrity, streaming installation, and efficient partial updates via a merkle tree structure.
+
+## Binary header
+
+Every `.s9pk` file begins with a 3-byte magic header identifying it as version 2 of the format:
+
+```
+0x3b  0x3b  0x02
+```
+
+The first two bytes are the magic (`0x3b 0x3b`) and the third byte is the format version. Any reader should reject files that do not start with this exact sequence.
+
+Immediately following the header is an **Ed25519 signature** over the SHA-512 hash of the blake3 merkle root of the archive. This signature is produced by the package publisher's key during `start-cli s9pk pack` and verified by StartOS before any content is extracted.
+
+## Archive structure
+
+The contents of the archive follow a defined layout:
+
+<Tree>
+  <Tree.File name="manifest.json (required)" />
+  <Tree.File name="icon.<ext> (required, any image/* format)" />
+  <Tree.File name="LICENSE.md (required)" />
+  <Tree.Folder name="dependencies/ (optional)" defaultOpen>
+    <Tree.Folder name="<package-id>/" defaultOpen>
+      <Tree.File name="metadata.json" />
+      <Tree.File name="icon.<ext>" />
+    </Tree.Folder>
+  </Tree.Folder>
+  <Tree.File name="javascript.squashfs (required)" />
+  <Tree.File name="assets.squashfs (optional)" />
+  <Tree.Folder name="images/" defaultOpen>
+    <Tree.Folder name="x86_64/" defaultOpen>
+      <Tree.File name="<image-id>.squashfs" />
+      <Tree.File name="<image-id>.json" />
+      <Tree.File name="<image-id>.env" />
+    </Tree.Folder>
+    <Tree.Folder name="aarch64/">
+      <Tree.File name="<image-id>.squashfs" />
+      <Tree.File name="<image-id>.json" />
+      <Tree.File name="<image-id>.env" />
+    </Tree.Folder>
+  </Tree.Folder>
+</Tree>
+
+Files are sorted by priority in the archive stream so that the most critical metadata is available first: `manifest.json` arrives before the runtime needs to make any decisions, then the icon and license for display, then dependency metadata, then the JavaScript code, then assets, and finally the larger container image files.
+
+## Components in detail
+
+### manifest.json
+
+The package manifest containing all metadata StartOS needs to install and display the service. It is the first file extracted from any download. See the [manifest reference](/sdk/manifest) for the full field list.
+
+### javascript.squashfs
+
+A squashfs filesystem containing the compiled JavaScript that implements the `ExpectedExports` ABI from `@start9labs/start-sdk-base`. The runtime mounts this read-only at `/usr/lib/startos/package/` and loads `index.js` to drive the package lifecycle (init, main, uninit, actions, createBackup).
+
+### images/
+
+Container images organized by CPU architecture. Each architecture directory contains three files per image ID:
+
+| File | Description |
+|------|-------------|
+| `<image-id>.squashfs` | Container root filesystem as a squashfs image. |
+| `<image-id>.json` | Image metadata: entrypoint, default user, working directory, labels, and exposed ports. |
+| `<image-id>.env` | Environment variables injected into the container at startup. |
+
+Supported architecture identifiers are `x86_64`, `aarch64`, and `riscv64`. When a package declares `emulateMissingAs` in its manifest, the runtime uses QEMU emulation to run an image built for a different architecture.
+
+### assets.squashfs
+
+Optional static assets mounted read-only at `/media/startos/assets/` in the container. Use this for configuration templates, scripts, or other read-only data you ship alongside your service code.
+
+### dependencies/
+
+Optional per-dependency metadata used to populate the UI when a dependency is not yet installed. Each subdirectory matches a dependency package ID and contains `metadata.json` (currently just the title) and an icon file.
+
+## Merkle archive
+
+The S9PK uses a merkle tree where each file and directory node has a blake3 hash. The root hash is what the Ed25519 signature covers. This design provides four concrete benefits:
+
+<CardGroup cols={2}>
+  <Card title="Partial downloads" icon="download">
+    StartOS can request and verify individual files from a package server without downloading the entire archive. The manifest and icon are typically fetched first to populate the marketplace UI.
+  </Card>
+  <Card title="Integrity verification" icon="shield-check">
+    Any subset of the archive can be independently verified against the root hash. Tampering with any single file invalidates the merkle path up to the root and the Ed25519 signature fails.
+  </Card>
+  <Card title="Efficient updates" icon="arrows-rotate">
+    When a new version of a package shares unchanged files with a previous version (common for multi-arch images), only the changed portions need to be downloaded.
+  </Card>
+  <Card title="DOS protection" icon="lock">
+    Size limits are enforced from the merkle metadata before any content bytes are downloaded, preventing servers from serving unbounded data to clients.
+  </Card>
+</CardGroup>
+
+## Building a package
+
+Use `start-cli` to assemble and sign a `.s9pk` from your compiled TypeScript and container images:
+
+```bash
+start-cli s9pk pack <manifest-path> -o my-service.s9pk
+```
+
+Images can be sourced in three ways:
+
+<Tabs>
+  <Tab title="Docker tag">
+    Pull an existing image from a Docker registry or local Docker daemon:
+
+    ```bash
+    start-cli s9pk pack manifest.json \
+      --docker-tag main=my-image:1.0.0 \
+      -o my-service.s9pk
+    ```
+  </Tab>
+  <Tab title="Docker build">
+    Build a fresh image from a Dockerfile before packing:
+
+    ```bash
+    start-cli s9pk pack manifest.json \
+      --docker-build main=./Dockerfile \
+      -o my-service.s9pk
+    ```
+  </Tab>
+  <Tab title="Pre-built squashfs">
+    Provide squashfs files you have already built externally:
+
+    ```bash
+    start-cli s9pk pack manifest.json \
+      --squashfs main=./main.squashfs \
+      -o my-service.s9pk
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The CLI handles squashfs conversion from Docker images automatically. You do not need to run `mksquashfs` manually when using `--docker-tag` or `--docker-build`.
+</Note>
+
+## Related source code
+
+The Rust implementation lives in the `core/` directory:
+
+| File | Description |
+|------|-------------|
+| `core/src/s9pk/v2/mod.rs` | S9pk struct and top-level serialization/deserialization. |
+| `core/src/s9pk/v2/manifest.rs` | Manifest types and JSON schema. |
+| `core/src/s9pk/v2/pack.rs` | Packing logic and image conversion. |
+| `core/src/s9pk/merkle_archive/` | Merkle archive implementation, hash computation, and streaming. |
+
+The TypeScript SDK also includes an S9pk parser in `base/lib/s9pk/` with a `S9pk` class that exposes `deserialize()`, `icon()`, `license()`, and similar methods for inspecting package contents from TypeScript.

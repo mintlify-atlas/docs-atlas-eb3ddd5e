@@ -1,0 +1,173 @@
+---
+title: "Managing Services on Your StartOS Server"
+description: "Browse the Start9 Marketplace, install and configure self-hosted services, monitor health, manage dependencies, and remove packages you no longer need."
+---
+
+Services are the core reason to run a StartOS server. Each service runs in its own isolated LXC container, packaged as a signed `.s9pk` file that StartOS verifies cryptographically before installation. The admin UI gives you a single interface to discover, install, configure, monitor, and remove every service on your server — no command line required.
+
+## Browsing the Marketplace
+
+The [Start9 Marketplace](https://marketplace.start9.com/) is the catalog of services available for StartOS. It is accessible directly from your server's admin UI under **Marketplace** in the left sidebar.
+
+<CardGroup cols={2}>
+  <Card title="Bitcoin & Lightning" icon="bitcoin">
+    Full Bitcoin node, Lightning node, BTCPay Server, and related payment infrastructure.
+  </Card>
+  <Card title="Communication" icon="message">
+    Self-hosted Matrix, SimpleX, and other messaging platforms.
+  </Card>
+  <Card title="Cloud Storage" icon="cloud">
+    Nextcloud, Vaultwarden, and productivity tools that replace third-party cloud services.
+  </Card>
+  <Card title="Community Packages" icon="users">
+    Services packaged by the community. If a service is missing, you can package it yourself using the Start9 SDK.
+  </Card>
+</CardGroup>
+
+Use the search bar and category filters to find what you need. Each listing shows the service version, developer key signature, description, and any required dependencies before you commit to installing.
+
+## Installing a Service
+
+<Steps>
+  <Step title="Find the service">
+    Open **Marketplace** in the sidebar. Browse or search for the service you want to install. Click the listing to open its detail page, where you can review its description, version history, and dependencies.
+  </Step>
+  <Step title="Start the installation">
+    Click **Install**. StartOS downloads the `.s9pk` package, verifies its merkle-archive signature against the developer's key, and unpacks it. A progress bar tracks the download and verification phases in real time.
+  </Step>
+  <Step title="Configure the service">
+    After installation completes, most services open a configuration form generated from the service's input spec. Fill in the required fields — these vary by service but commonly include usernames, passwords, and connection settings. Some services have optional fields that enable extra features.
+  </Step>
+  <Step title="Start the service">
+    Click **Start**. StartOS initializes the service container and transitions its desired state to `Running`. The status indicator on the service tile updates once the container is up.
+  </Step>
+</Steps>
+
+<Note>
+  If a service has unsatisfied dependencies, StartOS will prompt you to install them before or alongside the service you requested. See [Service Dependencies](#service-dependencies) below.
+</Note>
+
+## Service Status Indicators
+
+Every installed service displays a status badge reflecting its current state. These map to the `DesiredStatus` and `started` fields tracked internally by the StartOS daemon.
+
+| Status | Meaning |
+|---|---|
+| **Running** | Container is active and the service is operating normally. |
+| **Stopped** | Container is not running. The service was manually stopped or has not been started yet. |
+| **Starting** | StartOS is in the process of launching the container. |
+| **Stopping** | The container is shutting down gracefully. |
+| **Restarting** | A restart was requested; the service will stop and then start again automatically. |
+| **Backing Up** | A backup is in progress. The service may be paused during this window. |
+| **Needs Config** | Required configuration fields are missing or invalid. The service cannot start until they are filled in. |
+| **Error** | The service encountered an unrecoverable error. Check the error banner and service logs for details. |
+
+### Health Check Results
+
+Running services report health checks defined by the service developer. Each check has a name and one of the following result kinds:
+
+- **Success** — The check passed, with an optional descriptive message.
+- **Starting** — The service is still initializing; health checks are pending.
+- **Waiting** — The check is blocked, typically waiting for a dependency or network resource.
+- **Loading** — The service is actively working on something (syncing, indexing, etc.).
+- **Failure** — The check failed. The failure message describes what went wrong.
+- **Disabled** — The check is not applicable in the current configuration.
+
+Health check results refresh automatically as the backend pushes state diffs to the UI over a persistent WebSocket connection. You do not need to reload the page.
+
+## Configuring Services
+
+Service configuration is driven by the service's input spec — a structured schema that StartOS renders as a dynamic form. Fields can be text, numbers, toggles, dropdowns, file uploads, or nested objects and lists.
+
+<Steps>
+  <Step title="Open the service">
+    Click the service tile in **Services** to open its detail page.
+  </Step>
+  <Step title="Open Config">
+    Click the **Config** tab or the **Configure** button. The configuration form loads with your current saved values.
+  </Step>
+  <Step title="Edit and save">
+    Change any fields you need. Required fields are marked. Click **Save** when done — StartOS validates the form, stores the new configuration, and restarts the service if it was running.
+  </Step>
+</Steps>
+
+<Tip>
+  Some services expose **Actions** — one-click operations defined by the service developer beyond simple start/stop. Examples include resetting a password, exporting data, or re-running initialization. Actions are listed on the service detail page under the **Actions** tab.
+</Tip>
+
+## Service Dependencies
+
+Many services depend on other services to function. For example, a Lightning node typically requires a running Bitcoin node. StartOS tracks these relationships and enforces them.
+
+- If a required dependency is not installed, the service page shows a **Dependencies** section listing what is missing, with direct links to install each one from the Marketplace.
+- If a dependency is installed but stopped, StartOS may automatically start it when you start the dependent service, depending on how the dependency is declared (required vs. optional).
+- If a critical dependency fails a health check, dependent services may be stopped automatically to prevent data inconsistency.
+
+<Warning>
+  Stopping or uninstalling a service that other services depend on will affect those dependents. StartOS shows a warning listing all affected services before proceeding.
+</Warning>
+
+## Updating Services
+
+When a new version of a service is available in the Marketplace, an **Update** badge appears on the service tile and in the Marketplace listing.
+
+<Steps>
+  <Step title="Initiate the update">
+    Click **Update** on the service tile or detail page. StartOS downloads the new `.s9pk` package while the service continues running.
+  </Step>
+  <Step title="Migration">
+    When the download completes, the service stops, and StartOS runs any data migration logic defined by the service developer. This can include schema changes, file moves, or configuration transformations. A volume snapshot is taken before migration begins so a rollback is possible if something goes wrong.
+  </Step>
+  <Step title="Restart">
+    After migration, the service restarts with the new version. If the update or migration fails, StartOS restores the volume snapshot and returns the service to its previous installed state.
+  </Step>
+</Steps>
+
+<Note>
+  Updates happen one service at a time per package ID. If StartOS restarts while an update is in progress, it will resume or roll back the update automatically on next boot based on the saved install state.
+</Note>
+
+## Removing a Service
+
+<Steps>
+  <Step title="Stop the service">
+    If the service is running, stop it first using the **Stop** button on the service detail page.
+  </Step>
+  <Step title="Open the remove dialog">
+    Click the kebab menu (⋮) or the **Uninstall** button on the service detail page. StartOS shows a confirmation dialog.
+  </Step>
+  <Step title="Choose data retention">
+    The dialog asks whether to delete the service's data volumes. Choose **Delete Data** to remove all stored data along with the package, or **Keep Data** to retain volumes on disk (useful if you plan to restore the service from a backup later).
+  </Step>
+  <Step title="Confirm">
+    Click **Confirm**. StartOS removes the package entry from the database, frees its allocated network ports, and — if you chose to delete data — removes the volume directory at `/embassy-data/package-data/volumes/<service-id>/data/`.
+  </Step>
+</Steps>
+
+## Viewing Logs and Metrics
+
+### Service Logs
+
+Logs are streamed live from the service container over a WebSocket connection. To view them:
+
+1. Open the service detail page.
+2. Click the **Logs** tab.
+3. Logs appear in real time. Use the search bar to filter output. Scroll up to see historical log lines.
+
+Logs are stored per-service in the `logs` directory on the server. They persist across restarts until the service is uninstalled with data deletion.
+
+### Service Metrics
+
+For services that expose resource usage, the **Metrics** tab on the service detail page shows real-time data including memory usage (reported in MiB) and container ID. Metrics are pushed from the host daemon over a live WebSocket and update automatically without polling.
+
+<AccordionGroup>
+  <Accordion title="What if a service fails to install?">
+    If installation fails, StartOS rolls back: any in-progress install state is cleared and, if volume data was partially written, it is restored from a pre-install snapshot. Check the notification center for an error message describing what went wrong. Common causes include a failed download, a signature verification error, or a dependency that could not be satisfied.
+  </Accordion>
+  <Accordion title="Can I sideload a service not in the Marketplace?">
+    Yes. Services packaged as valid `.s9pk` files can be installed by uploading the file directly from the **Marketplace** upload option or via the `start-cli` command-line tool. The cryptographic signature is still verified; only packages signed with a trusted key will install successfully.
+  </Accordion>
+  <Accordion title="Why did my service stop unexpectedly?">
+    A service may be stopped automatically if a critical task defined by the service developer becomes active, or if a required dependency stops running. Check the service's **Tasks** panel and **Dependencies** section for active issues, and review the logs for the last known error state.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,89 @@
+---
+title: "Get started with StartOS in minutes"
+description: "Connect to your StartOS server for the first time, run the setup wizard, and install your first service from the Start9 Marketplace."
+---
+
+Once StartOS is installed and your server is powered on, getting up and running takes about ten minutes. This guide walks you through connecting to your server on your local network, completing the initial setup wizard, and installing your first service from the [Start9 Marketplace](https://marketplace.start9.com/).
+
+<Steps>
+  <Step title="Power on and connect to your network">
+    Connect your StartOS server to your router with an Ethernet cable and power it on. A wired connection is required for the initial setup — Wi-Fi can be configured later in **System > WiFi**.
+
+    Wait about 60 seconds for the server to finish booting. You can confirm it's ready when it appears on your router's device list, or when you can reach it at `http://start.local` from a browser on the same network.
+  </Step>
+
+  <Step title="Open the setup wizard">
+    On a device connected to the same local network, open a browser and navigate to:
+
+    ```
+    http://start.local
+    ```
+
+    If `start.local` does not resolve, check your router's admin panel for the IP address assigned to your server and navigate to that IP directly (for example, `http://192.168.1.100`).
+
+    <Tip>
+      If you are connecting from a device on a different network segment, use the server's IP address rather than the `.local` hostname.
+    </Tip>
+  </Step>
+
+  <Step title="Complete the initial setup wizard">
+    The setup wizard runs the first time you access a new StartOS installation. It will guide you through:
+
+    1. **Create a password** — This password protects the admin UI and encrypts your backups. Store it safely; there is no recovery path if you lose it.
+    2. **Save your recovery key** — StartOS generates a recovery key during setup. Write it down and store it offline.
+    3. **Name your server** — Choose a human-readable name for your device. This appears in the admin UI and in network addresses.
+
+    After completing the wizard, StartOS finishes provisioning and loads the main admin dashboard.
+  </Step>
+
+  <Step title="Access the admin UI">
+    After setup, you will land on the admin dashboard at `http://start.local`. From here you can manage services, configure networking, set up backups, and monitor system health.
+
+    <Tabs>
+      <Tab title="LAN (local network)">
+        Access the admin UI over your local network at `http://start.local` or via the server's IP address. StartOS automatically provisions a self-signed certificate for HTTPS on LAN — your browser will prompt you to trust it on first visit.
+      </Tab>
+      <Tab title="Tor (.onion address)">
+        Every StartOS server is assigned a `.onion` address during setup. This gives you private access from anywhere in the world without port-forwarding or exposing your home IP.
+
+        To use it, open the [Tor Browser](https://www.torproject.org/download/) and navigate to your server's `.onion` address, which you can find under **System > Tor**.
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Install your first service">
+    Open the **Marketplace** tab in the admin UI to browse services available from the [Start9 Marketplace](https://marketplace.start9.com/). The marketplace includes:
+
+    - **Bitcoin & Lightning** — Bitcoin Core, Core Lightning, LND, BTCPay Server
+    - **Communication** — Matrix Synapse, SimpleX Server, Nostr relays
+    - **Cloud & productivity** — Nextcloud, Vaultwarden, Jellyfin
+
+    To install a service:
+
+    1. Click the service you want from the marketplace listing.
+    2. Review its description, dependencies, and storage requirements.
+    3. Click **Install**. StartOS downloads and verifies the `.s9pk` package, provisions an LXC container, and starts the service.
+    4. Once the health check passes, click **Launch** to open the service's UI.
+
+    <Note>
+      Some services declare dependencies on other services. For example, a Lightning node depends on Bitcoin Core. StartOS will prompt you to install missing dependencies before completing the installation.
+    </Note>
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure networking" icon="network-wired" href="/concepts/networking">
+    Set up WireGuard VPN for fast remote access or configure a custom domain.
+  </Card>
+  <Card title="Set up backups" icon="database" href="/concepts/backups-and-storage">
+    Configure encrypted backups to a USB drive, network share, or cloud storage.
+  </Card>
+  <Card title="Manage services" icon="sliders" href="/admin/managing-services">
+    Learn how to configure, update, restart, and monitor installed services.
+  </Card>
+  <Card title="Package a service" icon="box" href="/sdk/quickstart">
+    Use the TypeScript SDK to package any app for the Start9 Marketplace.
+  </Card>
+</CardGroup>

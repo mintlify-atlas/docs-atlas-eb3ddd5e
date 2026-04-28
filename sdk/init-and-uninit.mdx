@@ -1,0 +1,170 @@
+---
+title: "Initialization, teardown, and version migrations"
+description: "Use setupInit and setupUninit to run lifecycle hooks on install, update, restore, and uninstall — with data version tracking for safe migrations."
+---
+
+Before a service's main processes start, and after they stop, StartOS calls two lifecycle hooks: `init` and `uninit`. These hooks handle everything that needs to happen outside of the running service — setting up interfaces, registering actions, declaring dependencies, running version migrations, and cleaning up on removal. Understanding when each hook fires, and what `kind` of event triggered it, is the foundation of writing a correct and upgradeable service package.
+
+## The lifecycle flow
+
+```
+INSTALL / UPDATE / RESTORE
+  └── init({ effects, kind })
+        ├── Version migrations (if kind === 'update')
+        ├── setupDependencies()
+        ├── setupInterfaces() — bind ports, export interfaces
+        └── Actions registration — export actions to OS
+
+MAIN
+  └── setupMain() → Daemons.of(effects)
+        ├── One-shots run first
+        ├── Daemons start in dependency order
+        ├── Health checks begin polling
+        └── Service runs until shutdown/restart
+
+SHUTDOWN / UNINSTALL / UPDATE
+  └── uninit({ effects, target })
+        └── Version down-migrations (if needed)
+```
+
+`init` always runs before `setupMain`. `uninit` always runs after the main processes have stopped.
+
+## setupInit()
+
+`setupInit()` registers the function StartOS calls at the start of each service lifecycle event. It receives a `kind` parameter that identifies why initialization is running:
+
+| `kind` value | When it fires |
+|---|---|
+| `'install'` | First-time package installation |
+| `'update'` | Package version upgrade or downgrade |
+| `'restore'` | Restoring from a backup |
+| `null` | Normal boot (no data change) |
+
+```typescript
+import { sdk } from './sdk'
+
+export const init = sdk.setupInit(async ({ effects, kind }) => {
+  if (kind === 'update') {
+    await runMigrations(effects)
+  }
+
+  await sdk.setupDependencies(effects, dependencies)
+  await sdk.setupInterfaces(effects, interfaces)
+  await sdk.Actions.of()
+    .addAction(myAction)
+    .export(effects)
+})
+```
+
+<Note>
+`setupInit` runs on every boot (`kind === null`) as well as on install, update, and restore. Keep the `null` case fast — it runs every time the service starts.
+</Note>
+
+## setupUninit()
+
+`setupUninit()` registers cleanup logic that runs after the main processes have stopped. Use it for tasks that must happen before the service is fully removed or replaced — such as persisting final state or running down-migrations when downgrading.
+
+```typescript
+export const uninit = sdk.setupUninit(async ({ effects, target }) => {
+  // target: 'uninstall' | 'update' | 'shutdown'
+  if (target === 'uninstall') {
+    await cleanupPersistentState(effects)
+  }
+})
+```
+
+## Event-specific callbacks
+
+For logic that only applies to one lifecycle event, `setupOnInit` and `setupOnUninit` provide narrower callbacks:
+
+```typescript
+// Only runs on first install
+sdk.setupOnInit('install', async ({ effects }) => {
+  await setDefaultConfig(effects)
+})
+
+// Only runs on version upgrade
+sdk.setupOnInit('update', async ({ effects }) => {
+  await runMigrations(effects)
+})
+
+// Only runs on uninstall
+sdk.setupOnUninit('uninstall', async ({ effects }) => {
+  await removeExternalRegistration(effects)
+})
+```
+
+These compose with `setupInit` / `setupUninit` — you can use both in the same package. Event-specific callbacks run after the main `setupInit` / `setupUninit` function.
+
+## Version tracking for migrations
+
+When a user upgrades a package, you need to know which migration steps to apply. The SDK provides `setDataVersion` and `getDataVersion` to track the version your data has been migrated to, independently of the package version:
+
+```typescript
+import { ExtendedVersion } from '@start9labs/start-sdk'
+
+await sdk.setDataVersion(effects, ExtendedVersion.parse('1.2.0:0'))
+
+// Returns ExtendedVersion | VersionRange | null:
+const version = await sdk.getDataVersion(effects)
+```
+
+The version string follows the [ExVer format](/sdk/versioning) (`upstream:downstream`). A typical migration pattern:
+
+```typescript
+import { ExtendedVersion } from '@start9labs/start-sdk'
+
+async function runMigrations(effects: Effects) {
+  const current = await sdk.getDataVersion(effects)
+  const v1_1 = ExtendedVersion.parse('1.1.0:0')
+  const v1_2 = ExtendedVersion.parse('1.2.0:0')
+
+  if (!current || ExtendedVersion.parse(current).lessThan(v1_1)) {
+    await migrateToV1_1(effects)
+  }
+
+  if (!current || ExtendedVersion.parse(current).lessThan(v1_2)) {
+    await migrateToV1_2(effects)
+  }
+
+  await sdk.setDataVersion(effects, ExtendedVersion.parse('1.2.0:0'))
+}
+```
+
+<Tip>
+Store the data version immediately after each migration step completes, not at the end. If a migration is interrupted, the next run will correctly skip the steps that already succeeded.
+</Tip>
+
+## Typical init workflow
+
+<Steps>
+  <Step title="Check kind and run migrations">
+    Branch on `kind === 'update'` to run any version-gated migration logic. Read the current data version, apply the necessary steps in order, and write the new data version when done.
+  </Step>
+  <Step title="Declare dependencies">
+    Call `setupDependencies()` to register which other services this service depends on, with version ranges and health check requirements. StartOS enforces these at install time and at runtime.
+  </Step>
+  <Step title="Bind ports and export interfaces">
+    Call `setupInterfaces()` to bind the ports your service listens on and export the network endpoints (UI, API, P2P) that users and other services can connect to.
+  </Step>
+  <Step title="Register actions">
+    Export user-invocable actions to the OS. These appear in the service's action menu in the StartOS UI.
+  </Step>
+</Steps>
+
+## Init and uninit are not the main process
+
+A common mistake is trying to start long-running background work inside `init`. These hooks must complete and return — they are not a substitute for `setupMain`. If your initialization needs to run a command in a container (such as a database schema setup), use `SubContainer.withTemp()`:
+
+```typescript
+export const init = sdk.setupInit(async ({ effects, kind }) => {
+  if (kind === 'install') {
+    const mounts = sdk.Mounts.of().mountVolume('main', '/data')
+    await sdk.SubContainer.withTemp(effects, { imageId: 'main' }, mounts, 'init-db', async (c) => {
+      await c.exec(['initdb', '/data/pgdata'])
+    })
+  }
+
+  await sdk.setupInterfaces(effects, interfaces)
+})
+```
